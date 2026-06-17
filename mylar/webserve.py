@@ -5391,6 +5391,45 @@ class WebInterface(object):
 
                 matcheroso = "no"
 
+                # First try matching by IDs in the existing DB
+                if mylar.CONFIG.ANNUALS_ON:
+                    comics_by_id = myDB.select(
+                        "SELECT c.comicid, comicyear, comiclocation, issueid, True as match_annual \
+                            FROM comics c LEFT JOIN annuals a ON c.comicid=a.comicid \
+                            WHERE a.releasecomicid=? AND a.issueid=? \
+                        UNION SELECT c.comicid, comicyear, comiclocation, issueid, False as match_annual \
+                            FROM comics c LEFT JOIN issues i ON c.comicid=i.comicid \
+                            WHERE c.comicid=? AND i.issueid=?",
+                        [arc['ComicID'], arc['IssueID'], arc['ComicID'], arc['IssueID']]
+                    )
+                else:
+                    comics_by_id = myDB.select(
+                        "SELECT c.comicid, comicyear, comiclocation, issueid, False as match_annual \
+                            FROM comics c LEFT JOIN issues i ON c.comicid=i.comicid \
+                            WHERE c.comicid=? AND i.issueid=?",
+                        [arc['ComicID'], arc['IssueID']]
+                    )
+                if comics_by_id:
+                    if len(comics_by_id) > 1:
+                        # If we find more than one issue, log a warning but continue, using the first result
+                        logger.warn("found more than one copy of issue %s, likely because it is added both via annual integration and independently" % (arc['IssueID']))
+                    comic_by_id = comics_by_id[0]
+                    arc_match.append({
+                        "match_storyarc":          arc['StoryArc'],
+                        "match_annual":            comic_by_id['match_annual'],
+                        "match_name":              arc['ComicName'],
+                        "match_id":                comic_by_id['comicid'],
+                        "match_issueid":           comic_by_id['issueid'],
+                        "match_issue":             arc['IssueNumber'],
+                        "match_issuearcid":        arc['IssueArcID'],
+                        "match_seriesyear":        comic_by_id['comicyear'],
+                        "match_readingorder":      arc['ReadingOrder'],
+                        "match_filedirectory":     comic_by_id['comiclocation'],   #series directory path
+                        "destination_location":    dstloc})                  #path to given storyarc / grab-bag directory
+                    # Since we found the result by id, we can continue to the next issue
+                    continue
+
+                # If we fail to find the comic by ID, fall back to looking by name
                 dyn_name = arc['DynamicComicName']
                 dyn_name = re.sub(r'[\|\s]','', dyn_name.lower()).strip()
                 if mylar.CONFIG.ANNUALS_ON:
