@@ -108,7 +108,8 @@ class Client(object):
                                   data={'username': username,
                                         'password': password},
                                   verify=self.verify)
-        if login.text == 'Ok.':
+        # This library has not been updated. The change below is related to a login API change in qbit 5.2
+        if login.status_code == 204 or login.text == 'Ok.':
             self._is_authenticated = True
         else:
             return login.text
