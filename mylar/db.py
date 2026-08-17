@@ -141,17 +141,25 @@ class DBConnection:
                         else:
                             sqlResult = self.connection.executemany(query, args)
                     self.connection.commit()
-                    break
+                    return sqlResult
                 except sqlite3.OperationalError as e:
                     if any(['unable to open database file' in e.args[0], 'database is locked' in e.args[0]]):
                         logger.warn('Database Error: %s' % e)
                         logger.warn('sqlresult: %s' %  query)
                         attempt += 1
-                        time.sleep(1)
+                        if attempt >= 5:
+                            logger.error('Database action failed after %s attempts: %s :: %s' % (attempt, query, e))
+                            return None
                     else:
                         logger.error('Database error executing %s :: %s' % (query, e))
                         raise
-            return sqlResult
+                finally:
+                    if self.connection.in_transaction:
+                        self.connection.rollback()
+
+                time.sleep(1)
+
+            return None
 
     def select(self, query, args=None):
 
@@ -180,7 +188,9 @@ class DBConnection:
 
         query = "UPDATE " + tableName + " SET " + ", ".join(genParams(valueDict)) + " WHERE " + " AND ".join(genParams(keyDict))
 
-        self.action(query, list(valueDict.values()) + list(keyDict.values()))
+        sqlResult = self.action(query, list(valueDict.values()) + list(keyDict.values()))
+        if sqlResult is None:
+            return
 
         if self.connection.total_changes == changesBefore:
             query = "INSERT INTO " +tableName +" (" + ", ".join(list(valueDict.keys()) + list(keyDict.keys())) + ")" + \
@@ -194,5 +204,4 @@ class DBConnection:
         #    self.queue.put( (tableName, valueDict, keyDict) )
         #    #assuming this is coming in from a seperate thread, so loop it until it's free to write.
         #    #self.queuesend()
-
 
