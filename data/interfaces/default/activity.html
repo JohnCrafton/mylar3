@@ -1,0 +1,132 @@
+<%inherit file="base.html"/>
+<%!
+	import mylar
+%>
+
+<%def name="headerIncludes()">
+	<div id="subhead_container">
+		<div id="subhead_menu">
+			<a id="menu_link_new" href="history">Download History</a>
+			<a id="menu_link_edit" href="logs">View Logs</a>
+		</div>
+	</div>
+</%def>
+
+<%def name="body()">
+        <input type="hidden" id="page_name" value="activity" />
+	<div id="paddingheader">
+		<h1 class="clearfix"><img src="images/icon_history.png" alt="Activity"/>Activity</h1>
+	</div>
+
+%if not mylar.CONFIG.ENABLE_ISSUE_EVENTS:
+        <div class="table_wrapper">
+            <p style="text-align:center;">
+                Issue event tracking is switched off, so there is nothing to show here yet.<br/>
+                Turn on <strong>Track Issue Events</strong> under
+                <a href="config">Settings &rarr; Web Interface</a> and events will start
+                being recorded from that point on.
+            </p>
+        </div>
+%else:
+        <div class="table_wrapper" id="activity_table_wrapper">
+            <table class="display" id="activity_table" style="width:100%;">
+                <thead>
+                    <tr>
+                        <th id="when" style="width:150px;text-align:center;">When</th>
+                        <th id="series" style="width:200px;text-align:center;">Series</th>
+                        <th id="event" style="width:200px;text-align:center;">What happened</th>
+                        <th id="provider" style="width:120px;text-align:center;">Provider</th>
+                        <th id="detail" style="text-align:center;">Details</th>
+                    </tr>
+                </thead>
+                <tbody></tbody>
+            </table>
+        </div>
+%endif
+</%def>
+
+<%def name="headIncludes()">
+</%def>
+
+<%def name="javascriptIncludes()">
+	<script src="js/libs/jquery.dataTables.min.js"></script>
+        <script src="js/libs/full_numbers_no_ellipses.js"></script>
+        <script>
+%if mylar.CONFIG.ENABLE_ISSUE_EVENTS:
+        $.fn.DataTable.ext.pager.numbers_length = 3;
+
+        function esc(text){
+                return $('<div/>').text(text === null || text === undefined ? '' : text).html();
+        }
+
+        function initThisPage() {
+            $('#activity_table').dataTable({
+                "destroy": true,
+                "sDom": '<"clear"f><"clear"lp><"clear">rt<"clear"ip>',
+                "processing": true,
+                "serverSide": true,
+                "ajaxSource": 'loadActivity',
+                // newest first: this is an append-only log, so any other
+                // default ordering buries what just happened
+                "aaSorting": [[0, 'desc']],
+                "columnDefs": [
+                    {
+                       "sortable": true,
+                       "targets": [ 0 ],
+                       "render": function (data,type,full) {
+                           return esc(full[0]);
+                       }
+                    },
+                    {
+                       "sortable": true,
+                       "targets": [ 1 ],
+                       "render": function (data,type,full) {
+                           if (full[6] === null || full[1] === null){
+                               return esc(full[1]);
+                           }
+                           var name = esc(full[1]);
+                           if (full[5] !== null){
+                               name += ' #' + esc(full[5]);
+                           }
+                           return '<a href="comicDetails?ComicID=' + esc(full[6]) + '">' + name + '</a>';
+                       }
+                    },
+                    {
+                       "sortable": true,
+                       "targets": [ 2 ],
+                       "render": function (data,type,full) {
+                           return esc(full[2]);
+                       }
+                    },
+                    {
+                       "sortable": true,
+                       "targets": [ 3 ],
+                       "render": function (data,type,full) {
+                           return esc(full[3]);
+                       }
+                    },
+                    {
+                       "sortable": false,
+                       "targets": [ 4 ],
+                       "render": function (data,type,full) {
+                           return esc(full[4]);
+                       }
+                    }
+                ],
+                "oLanguage": {
+                    "sEmptyTable": "No events recorded yet",
+                    "sSearch": "Filter: ",
+                    "sInfoEmpty": "Showing 0 to 0 of 0 events",
+                    "sInfo": "Showing _START_ to _END_ of _TOTAL_ events",
+                    "sInfoFiltered": "(filtered from _MAX_ total events)"
+                }
+            });
+        }
+
+        $(document).ready(function() {
+            initThisPage();
+        });
+%endif
+        $(document).ready(function(){ initActions(); });
+        </script>
+</%def>

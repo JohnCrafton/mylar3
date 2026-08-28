@@ -25,6 +25,7 @@ import calendar
 
 import mylar
 from mylar import db, logger, helpers, filechecker
+from mylar import events
 
 def addvialist(queue):
     while True:
@@ -943,6 +944,10 @@ def foundsearch(ComicID, IssueID, mode=None, down=None, provider=None, SARC=None
     if down is None:
         # update the status to Snatched (so it won't keep on re-downloading!)
         logger.info(module + ' Updating status to snatched')
+        # One call covers every branch below; the status writes that follow
+        # differ only in which table they touch.
+        events.record(IssueID, comicid=ComicID, event='snatched',
+                      provider=provider, detail=comicname)
         logger.fdebug(module + ' Provider is ' + provider)
         if hash:
             logger.fdebug(module + ' Hash set to : ' + hash)

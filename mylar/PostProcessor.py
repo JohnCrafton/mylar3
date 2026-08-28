@@ -29,6 +29,7 @@ from xml.dom.minidom import parseString
 import mylar
 
 from mylar import logger, db, helpers, updater, notifiers, filechecker, weeklypull, getimage
+from mylar import events
 
 class PostProcessor(object):
     """
@@ -3252,6 +3253,12 @@ class PostProcessor(object):
                           "Location":     os.path.basename(dst)}
                 logger.fdebug('writing: %s -- %s' % (newVal, ctrlVal))
                 myDB.upsert(updatetable, newVal, ctrlVal)
+                events.record(issueid, event='file_moved',
+                              detail=os.path.basename(dst))
+            else:
+                # the status write is skipped here, so without this the issue
+                # silently stays Snatched with no record of why
+                events.record(issueid, event='file_copy_failed', detail=dst)
 
             try:
                 if ml['IssueArcID']:

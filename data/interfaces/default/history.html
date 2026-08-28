@@ -1,5 +1,6 @@
 <%inherit file="base.html"/>
 <%!
+	import mylar
 	from mylar import helpers
 %>
 
@@ -12,6 +13,9 @@
 			<a id="menu_link_delete" href="#" onclick="doAjaxCall('clearhistory?status_type=Snatched',$(this),'table')" data-success="All Snatched cleared">Clear Snatched</a>
                         <a id="menu_link_delete" href="#" onclick="doAjaxCall('wipenzblog',$(this),'table')" data-success="Wiped entire NZB DB">Wipe NZBLOG</a>
                         <a id="menu_link_delete" href="logs">View Logs</a>
+%if mylar.CONFIG.ENABLE_ISSUE_EVENTS:
+                        <a id="menu_link_delete" href="activity">Activity</a>
+%endif
 		</div>
 	</div>	
 </%def>
