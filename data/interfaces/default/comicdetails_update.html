@@ -9,6 +9,22 @@
         <div id="cv_removed_dialog" title="ComicVine ComicID change detected" style="display:none">
             <span id="crd"></span>
         </div>
+%if mylar.CONFIG.ENABLE_ISSUE_EVENTS:
+        <style>
+        /* Not class="display": base.html's reload_table() runs
+           $('table.display').DataTable().ajax.reload() across the page, which
+           drags any table with that class into DataTables and then asks it to
+           reload from an ajax source it does not have. */
+        table.issue_timeline_panel { border-collapse: collapse; }
+        table.issue_timeline_panel th,
+        table.issue_timeline_panel td { padding: 4px 8px; vertical-align: top; }
+        table.issue_timeline_panel thead th { border-bottom: 1px solid #555; text-align: left; }
+        table.issue_timeline_panel tbody tr:nth-child(even) { background: rgba(127,127,127,.07); }
+        </style>
+        <div id="issue_timeline_dialog" title="Issue history" style="display:none" class="configtable">
+            <div id="issue_timeline_body"></div>
+        </div>
+%endif
 	<div id="subhead_container">
 		<div id="subhead_menu">
                         <a id="menu_link_refresh" title="retrieve any new information for the series" onclick="refresh_series(${comic['ComicID']})" href="#">Refresh Comic</a>
@@ -1357,6 +1373,53 @@
                });
         }
 
+%if mylar.CONFIG.ENABLE_ISSUE_EVENTS:
+        // Delegated, because the rows are redrawn by DataTables on every page,
+        // filter and sort change.
+        $(document).delegate('a.issue_timeline_link', 'click', function(event){
+                event.preventDefault();
+                var issueid = $(this).attr('data-issueid');
+                var body = $('#issue_timeline_body');
+                body.html('<p>Loading&hellip;</p>');
+                $('#issue_timeline_dialog').dialog({
+                        modal: true,
+                        width: "55%",
+                        maxHeight: 500
+                });
+                $.getJSON('issueTimeline', {IssueID: issueid}, function(data){
+                        if (!data.enabled){
+                                body.html('<p>Issue event tracking is switched off.</p>');
+                                return;
+                        }
+                        if (!data.events.length){
+                                // not an error: the setting may have been turned
+                                // on after this issue was already dealt with
+                                body.html('<p>Nothing recorded for this issue yet.</p>');
+                                return;
+                        }
+                        var rows = '<table class="issue_timeline_panel" style="width:100%"><thead><tr>' +
+                                   '<th>When</th><th>What happened</th><th>Provider</th><th>Details</th>' +
+                                   '</tr></thead><tbody>';
+                        for (var i = 0; i < data.events.length; i++){
+                                var e = data.events[i];
+                                var extra = e.detail === null ? '' : e.detail;
+                                if (e.progress !== null && e.progress !== undefined){
+                                        extra += ' (' + e.progress + '%)';
+                                }
+                                rows += '<tr><td>' + esc(e.time) + '</td><td>' + esc(e.label) +
+                                        '</td><td>' + esc(e.provider === null ? '' : e.provider) +
+                                        '</td><td>' + esc(extra) + '</td></tr>';
+                        }
+                        body.html(rows + '</tbody></table>');
+                }).error(function(){
+                        body.html('<p>Could not load the history for this issue.</p>');
+                });
+        });
+
+        function esc(text){
+                return $('<div/>').text(text === null || text === undefined ? '' : text).html();
+        }
+%endif
         function ShowSpinner() {
                 feedback = $("#ajaxMsg");
                 update = $("#updatebar");
@@ -1751,6 +1814,13 @@
                                } else {
                                    response = '<center>'+full[3]+'</center>';
                                }
+%if mylar.CONFIG.ENABLE_ISSUE_EVENTS:
+                               // appended inside the existing cell rather than
+                               // added as a column: #issue_table has stateSave
+                               // on, and changing the column count against a
+                               // saved state throws in DataTables.
+                               response += '<center><a href="#" class="issue_timeline_link" data-issueid="' + full[4] + '" title="What happened to this issue">history</a></center>';
+%endif
                                return response;
                            }
                        },

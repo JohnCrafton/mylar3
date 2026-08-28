@@ -263,6 +263,14 @@
                                     <input type="text" name="instance_name" id="instance_name" value="${config['instance_name']}" size="30">
                                     <small>Use to add an additional string to the browser title</small>
                                 </div>
+                                <div class="row checkbox">
+                                    <input type="checkbox" name="enable_issue_events" id="enable_issue_events" value="1" ${config['enable_issue_events']} /><label>Track Issue Events</label>
+                                    <small>Records what happened to each issue - searched, snatched, filed, failed - and shows it on the issue. Does not change how downloads work.</small>
+                                </div>
+                                <div class="row">
+                                    <label>Keep Issue Events For</label>
+                                    <input type="text" name="issue_events_retention_days" id="issue_events_retention_days" value="${config['issue_events_retention_days']}" size="4"><small>days</small>
+                                </div>
                     		 </fieldset>
                          <fieldset>
                              <legend>Annual Handling</legend>

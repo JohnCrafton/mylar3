@@ -57,6 +57,7 @@ from mylar import (
     carepackage,
     config,
     db,
+    events,
     Failed,
     filechecker,
     helpers,
@@ -1070,6 +1071,99 @@ class WebInterface(object):
             'aaData': rows,
         })
     loadAnnualDetails.exposed = True
+
+    def issueTimeline(self, IssueID=None, **kwargs):
+        """Lifecycle events for one issue, newest first."""
+        if IssueID is None:
+            return json.dumps({'events': [], 'enabled': False})
+
+        if not mylar.CONFIG.ENABLE_ISSUE_EVENTS:
+            return json.dumps({'events': [], 'enabled': False})
+
+        myDB = db.DBConnection()
+        rows = myDB.select(
+            'SELECT EventType, EventTime, Provider, Detail, Progress, QueuePosition'
+            ' FROM issue_events WHERE IssueID=? ORDER BY EventID DESC LIMIT 200',
+            [IssueID]
+        )
+
+        events_out = []
+        for row in rows:
+            events_out.append({
+                'event': row['EventType'],
+                'label': events.EVENT_LABELS.get(row['EventType'], row['EventType']),
+                'time': row['EventTime'],
+                'provider': row['Provider'],
+                'detail': row['Detail'],
+                # populated only once the download-client polling feature lands
+                'progress': row['Progress'],
+                'queue_position': row['QueuePosition'],
+            })
+
+        # an issue with no events is a normal answer, not an error: the flag
+        # may have been switched on after the issue was already dealt with
+        return json.dumps({'events': events_out, 'enabled': True})
+    issueTimeline.exposed = True
+
+    def activity(self):
+        return serve_template(templatename="activity.html", title="Activity")
+    activity.exposed = True
+
+    def loadActivity(self, iDisplayStart=0, iDisplayLength=100, iSortCol_0=0,
+                     sSortDir_0="desc", sSearch="", **kwargs):
+        """Cross-series event feed - what is in flight right now."""
+        if not mylar.CONFIG.ENABLE_ISSUE_EVENTS:
+            return json.dumps({'iTotalDisplayRecords': 0, 'iTotalRecords': 0,
+                               'aaData': []})
+
+        myDB = db.DBConnection()
+
+        # Paged in SQL rather than in python: this table is append-only and
+        # grows with every search, so loading it all to show 100 rows would
+        # get slower every day the feature is on.
+        base = ('FROM issue_events e'
+                ' LEFT JOIN comics c ON c.ComicID = e.ComicID'
+                ' LEFT JOIN issues i ON i.IssueID = e.IssueID')
+
+        args = []
+        where = ''
+        if sSearch:
+            where = (" WHERE (c.ComicName LIKE ? OR e.EventType LIKE ?"
+                     " OR e.Provider LIKE ? OR e.Detail LIKE ?)")
+            args = ['%%%s%%' % sSearch] * 4
+
+        total = myDB.selectone('SELECT COUNT(*) as c FROM issue_events').fetchone()['c']
+        matching = myDB.selectone(
+            'SELECT COUNT(*) as c %s%s' % (base, where), args
+        ).fetchone()['c']
+
+        order = events.activity_order_by(iSortCol_0, sSortDir_0)
+        rows = myDB.select(
+            'SELECT e.EventID, e.IssueID, e.ComicID, e.EventType, e.EventTime,'
+            ' e.Provider, e.Detail, c.ComicName, i.Issue_Number %s%s'
+            ' ORDER BY %s LIMIT ? OFFSET ?' % (base, where, order),
+            args + [int(iDisplayLength), int(iDisplayStart)]
+        )
+
+        aa = []
+        for row in rows:
+            aa.append([
+                row['EventTime'],
+                row['ComicName'],
+                events.EVENT_LABELS.get(row['EventType'], row['EventType']),
+                row['Provider'],
+                row['Detail'],
+                row['Issue_Number'],
+                row['ComicID'],
+                row['IssueID'],
+            ])
+
+        return json.dumps({
+            'iTotalDisplayRecords': matching,
+            'iTotalRecords': total,
+            'aaData': aa,
+        })
+    loadActivity.exposed = True
 
     def loadSearchResults(self, query=None, iDisplayStart=0, iDisplayLength=25, iSortCol_0='1', sSortDir_0="desc", sSearch="", hide_already='0', hide_tpb='0', **kwargs):
 
@@ -7161,6 +7255,8 @@ class WebInterface(object):
                     "dltotals": freq_tot,
                     "alphaindex": mylar.CONFIG.ALPHAINDEX,
                     "backup_on_start": helpers.checked(mylar.CONFIG.BACKUP_ON_START),
+                    "enable_issue_events": helpers.checked(mylar.CONFIG.ENABLE_ISSUE_EVENTS),
+                    "issue_events_retention_days": mylar.CONFIG.ISSUE_EVENTS_RETENTION_DAYS,
                }
         return serve_template(templatename="config.html", title="Settings", config=config, comicinfo=comicinfo)
     config.exposed = True
@@ -7492,7 +7588,8 @@ class WebInterface(object):
                            'prowl_enabled', 'prowl_onsnatch', 'pushover_enabled', 'pushover_onsnatch', 'pushover_image', 'mattermost_enabled', 'mattermost_onsnatch', 'boxcar_enabled',
                            'boxcar_onsnatch', 'pushbullet_enabled', 'pushbullet_onsnatch', 'telegram_enabled', 'telegram_onsnatch', 'telegram_image', 'discord_enabled', 'discord_onsnatch', 'slack_enabled', 'slack_onsnatch',
                            'email_enabled', 'email_enc', 'email_ongrab', 'email_onpost', 'gotify_enabled', 'gotify_server_url', 'gotify_token', 'gotify_onsnatch', 'opds_enable', 'opds_authentication', 'opds_metainfo', 'opds_pagesize', 'enable_ddl',
-                           'enable_getcomics', 'enable_airdcpp', 'jd2_enable', 'enable_external_server', 'ddl_prefer_upscaled', 'deluge_pause'] #enable_public
+                           'enable_getcomics', 'enable_airdcpp', 'jd2_enable', 'enable_external_server', 'ddl_prefer_upscaled', 'deluge_pause',
+                           'enable_issue_events'] #enable_public
 
         for checked_config in checked_configs:
             if checked_config not in kwargs:

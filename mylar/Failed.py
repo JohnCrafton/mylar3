@@ -17,6 +17,7 @@
 
 import mylar
 from mylar import logger, db, updater, helpers, parseit, findcomicfeed, notifiers, rsscheck
+from mylar import events
 
 import feedparser as feedparser
 import urllib.request, urllib.parse, urllib.error
@@ -204,6 +205,8 @@ class FailedProcessor(object):
         ctrlVal = {"IssueID": issueid}
         Vals = {"Status":    'Failed'}
         myDB.upsert("issues", Vals, ctrlVal)
+        events.record(issueid, comicid=comicid, event='marked_failed',
+                      provider=self.prov, detail=nzbname)
 
         ctrlVal = {"ID":       self.id,
                    "Provider": self.prov,
@@ -295,6 +298,8 @@ class FailedProcessor(object):
         myDB = db.DBConnection()
 
         logger.info(module + ' Marking as a Failed Download.')
+        events.record(self.issueid, comicid=self.comicid, event='marked_failed',
+                      provider=self.prov, detail=self.nzb_name)
 
         logger.fdebug(module + 'nzb_name: ' + self.nzb_name)
         logger.fdebug(module + 'issueid: ' + str(self.issueid))

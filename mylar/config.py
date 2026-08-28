@@ -148,6 +148,8 @@ _CONFIG_DEFINITIONS = OrderedDict({
     'ALPHAINDEX': (bool, 'Interface', True),
     'CHERRYPY_LOGGING': (bool, 'Interface', False),
     'INSTANCE_NAME': (str, 'Interface', None),
+    'ENABLE_ISSUE_EVENTS': (bool, 'Interface', False),
+    'ISSUE_EVENTS_RETENTION_DAYS': (int, 'Interface', 60),
 
     'API_ENABLED' : (bool, 'API', False),
     'API_KEY' : (str, 'API', None),

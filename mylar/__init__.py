@@ -43,6 +43,7 @@ import cherrypy
 from mylar import logger, versioncheckit, rsscheckit, searchit, weeklypullit, PostProcessor, updater, helpers, sabnzbd
 from mylar.queues import (
     ddl_downloader,
+    event_monitor,
     jd2_queue_monitor,
     nzb_monitor,
     postprocess_main,
@@ -149,12 +150,16 @@ SEARCHPOOL = None
 PPPOOL = None
 DDLPOOL = None
 JD2POOL = None
+EVENTPOOL = None
 SNATCHED_QUEUE = queue.Queue()
 NZB_QUEUE = queue.Queue()
 PP_QUEUE = queue.Queue()
 SEARCH_QUEUE = queue.Queue()
 DDL_QUEUE = queue.Queue()
 JD2_QUEUE = queue.Queue()
+# Bounded: a full queue means the writer thread is wedged, and dropping
+# telemetry beats blocking whichever download thread called record().
+EVENT_QUEUE = queue.Queue(maxsize=2000)
 RETURN_THE_NZBQUEUE = queue.Queue()
 MASS_ADD = None
 ADD_LIST = queue.Queue()
@@ -256,9 +261,9 @@ def initialize(config_file):
     with INIT_LOCK:
 
         global CONFIG, _INITIALIZED, QUIET, CONFIG_FILE, MINIMUM_PY_VERSION, OS_DETECT, MAINTENANCE, CURRENT_VERSION, LATEST_VERSION, COMMITS_BEHIND, INSTALL_TYPE, IMPORTLOCK, PULLBYFILE, INKDROPS_32P, \
-               DONATEBUTTON, CURRENT_WEEKNUMBER, CURRENT_YEAR, UMASK, USER_AGENT, SNATCHED_QUEUE, NZB_QUEUE, PP_QUEUE, SEARCH_QUEUE, DDL_QUEUE, JD2_QUEUE, PULLNEW, COMICSORT, WANTED_TAB_OFF, CV_HEADERS, \
+               DONATEBUTTON, CURRENT_WEEKNUMBER, CURRENT_YEAR, UMASK, USER_AGENT, SNATCHED_QUEUE, NZB_QUEUE, PP_QUEUE, SEARCH_QUEUE, DDL_QUEUE, JD2_QUEUE, EVENT_QUEUE, PULLNEW, COMICSORT, WANTED_TAB_OFF, CV_HEADERS, \
                IMPORTBUTTON, IMPORT_FILES, IMPORT_TOTALFILES, IMPORT_CID_COUNT, IMPORT_PARSED_COUNT, IMPORT_FAILURE_COUNT, CHECKENABLED, CVURL, DEMURL, EXPURL, WWTURL, WWT_CF_COOKIEVALUE, \
-               DDLPOOL, JD2POOL, NZBPOOL, SNPOOL, PPPOOL, SEARCHPOOL, RETURN_THE_NZBQUEUE, MASS_ADD, ADD_LIST, MASS_REFRESH, REFRESH_QUEUE, SSE_KEY, \
+               DDLPOOL, JD2POOL, EVENTPOOL, NZBPOOL, SNPOOL, PPPOOL, SEARCHPOOL, RETURN_THE_NZBQUEUE, MASS_ADD, ADD_LIST, MASS_REFRESH, REFRESH_QUEUE, SSE_KEY, \
                USE_SABNZBD, USE_NZBGET, USE_BLACKHOLE, USE_RTORRENT, USE_UTORRENT, USE_QBITTORRENT, USE_DELUGE, USE_TRANSMISSION, USE_WATCHDIR, SAB_PARAMS, PUBLISHER_IMPRINTS, \
                PROG_DIR, DATA_DIR, CMTAGGER_PATH, LOCAL_IP, STATIC_COMICRN_VERSION, STATIC_APC_VERSION, KEYS_32P, AUTHKEY_32P, FEED_32P, FEEDINFO_32P, \
                MONITOR_STATUS, SEARCH_STATUS, RSS_STATUS, WEEKLY_STATUS, VERSION_STATUS, UPDATER_STATUS, FORCE_STATUS, DBUPDATE_INTERVAL, DB_BACKFILL, LOG_LANG, LOG_CHARSET, APILOCK, SEARCHLOCK, DDL_LOCK, LOG_LEVEL, \
@@ -610,6 +615,9 @@ def start():
                 queue_schedule('jd2_queue', 'start')
                 mylar.JD2_QUEUE.put('startup')
 
+            if CONFIG.ENABLE_ISSUE_EVENTS is True:
+                queue_schedule('event_queue', 'start')
+
             helpers.latestdate_fix()
 
             if CONFIG.ALT_PULL == 2:
@@ -792,6 +800,15 @@ def queue_schedule(queuetype, mode):
                 'JD2 queue enabled & monitoring for requests....',
                 'Succesfully started JD2 Queuer....',
             )
+        elif queuetype == 'event_queue':
+            start(
+                "EVENTPOOL",
+                event_monitor,
+                EVENT_QUEUE,
+                "ISSUE-EVENTS",
+                'Issue event log enabled & monitoring for events....',
+                'Succesfully started the Issue Event writer....',
+            )
     else:
         if (queuetype == 'nzb_queue') or mode == 'shutdown':
             if all([mode!= 'shutdown', mylar.CONFIG.POST_PROCESSING is True]) and ( all([mylar.CONFIG.NZB_DOWNLOADER == 0, mylar.CONFIG.SAB_CLIENT_POST_PROCESSING is True]) or all([mylar.CONFIG.NZB_DOWNLOADER == 1, mylar.CONFIG.NZBGET_CLIENT_POST_PROCESSING is True]) ):
@@ -819,6 +836,11 @@ def queue_schedule(queuetype, mode):
             if all([getattr(mylar.CONFIG, 'JD2_ENABLE', False) is True, mode != 'shutdown']):
                 return
             shutdown(mylar.JD2POOL, mylar.JD2_QUEUE, 'JD2 queue')
+
+        if (queuetype == 'event_queue') or mode == 'shutdown':
+            if all([getattr(mylar.CONFIG, 'ENABLE_ISSUE_EVENTS', False) is True, mode != 'shutdown']):
+                return
+            shutdown(mylar.EVENTPOOL, mylar.EVENT_QUEUE, 'issue event queue')
 
 
 def sql_db():
@@ -862,6 +884,8 @@ def dbcheck():
     c.execute('CREATE TABLE IF NOT EXISTS tmp_searches (query_id INTEGER, comicid INTEGER, comicname TEXT, publisher TEXT, publisherimprint TEXT, comicyear TEXT, issues TEXT, volume TEXT, deck TEXT, url TEXT, type TEXT, cvarcid TEXT, arclist TEXT, description TEXT, haveit TEXT, mode TEXT, searchtype TEXT, comicimage TEXT, thumbimage TEXT, PRIMARY KEY (query_id, comicid))')
     c.execute('CREATE TABLE IF NOT EXISTS notifs(session_id INT, date TEXT, event TEXT, comicid TEXT, comicname TEXT, issuenumber TEXT, seriesyear TEXT, status TEXT, message TEXT, PRIMARY KEY (session_id, date))')
     c.execute('CREATE TABLE IF NOT EXISTS provider_searches(id INTEGER UNIQUE, provider TEXT UNIQUE, type TEXT, lastrun INTEGER, active TEXT, hits INTEGER DEFAULT 0)')
+    c.execute('CREATE TABLE IF NOT EXISTS issue_events(EventID INTEGER PRIMARY KEY AUTOINCREMENT, IssueID TEXT, ComicID TEXT, EventType TEXT, EventTime TEXT, Provider TEXT, Detail TEXT, Progress INTEGER, QueuePosition INTEGER, Extra TEXT)')
+    c.execute('CREATE INDEX IF NOT EXISTS idx_issue_events_issueid ON issue_events (IssueID, EventID)')
     c.execute('CREATE TABLE IF NOT EXISTS mylar_info(DatabaseVersion INTEGER PRIMARY KEY)')
     conn.commit()
 

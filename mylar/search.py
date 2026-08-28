@@ -15,6 +15,7 @@
 
 
 import mylar
+from mylar import events
 from mylar import (
     logger,
     db,
@@ -132,6 +133,8 @@ def search_init(
     provider_list = provider_order(initial_run=True)
     findit = {}
     findit['status'] = False
+
+    events.record(IssueID, event='search_started', detail=ComicName)
 
     if provider_list['totalproviders'] == 0:
         logger.error(
@@ -554,6 +557,7 @@ def search_init(
             elif mylar.CONFIG.MODE_32P == 1 and searchmode == 'api':
                 return findit, 'None'
 
+    events.record(IssueID, event='search_no_results', detail=ComicName)
     return findit, 'None'
 
 def provider_order(initial_run=False):
