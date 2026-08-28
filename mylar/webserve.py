@@ -65,6 +65,7 @@ from mylar import (
     logger,
     mb,
     moveit,
+    navmenu,
     notifiers,
     parseit,
     PostProcessor,
@@ -6805,6 +6806,14 @@ class WebInterface(object):
 
     pretty_git.exposed = True
     #---
+    def navMenu(self):
+        # the overlay is opt-in; hand back an empty menu when it's disabled so
+        # a stale page can't keep rendering links after the flag is turned off.
+        if not mylar.CONFIG.ENABLE_NAV_MENU:
+            return json.dumps({'articles': [], 'actions': []})
+        return json.dumps(navmenu.menu_payload())
+    navMenu.exposed = True
+
     def config(self):
         interface_dir = os.path.join(mylar.PROG_DIR, 'data', 'interfaces')
         interface_list = [name for name in os.listdir(interface_dir) if os.path.isdir(os.path.join(interface_dir, name))]
@@ -7161,6 +7170,7 @@ class WebInterface(object):
                     "dltotals": freq_tot,
                     "alphaindex": mylar.CONFIG.ALPHAINDEX,
                     "backup_on_start": helpers.checked(mylar.CONFIG.BACKUP_ON_START),
+                    "enable_nav_menu": helpers.checked(mylar.CONFIG.ENABLE_NAV_MENU),
                }
         return serve_template(templatename="config.html", title="Settings", config=config, comicinfo=comicinfo)
     config.exposed = True
@@ -7492,7 +7502,8 @@ class WebInterface(object):
                            'prowl_enabled', 'prowl_onsnatch', 'pushover_enabled', 'pushover_onsnatch', 'pushover_image', 'mattermost_enabled', 'mattermost_onsnatch', 'boxcar_enabled',
                            'boxcar_onsnatch', 'pushbullet_enabled', 'pushbullet_onsnatch', 'telegram_enabled', 'telegram_onsnatch', 'telegram_image', 'discord_enabled', 'discord_onsnatch', 'slack_enabled', 'slack_onsnatch',
                            'email_enabled', 'email_enc', 'email_ongrab', 'email_onpost', 'gotify_enabled', 'gotify_server_url', 'gotify_token', 'gotify_onsnatch', 'opds_enable', 'opds_authentication', 'opds_metainfo', 'opds_pagesize', 'enable_ddl',
-                           'enable_getcomics', 'enable_airdcpp', 'jd2_enable', 'enable_external_server', 'ddl_prefer_upscaled', 'deluge_pause'] #enable_public
+                           'enable_getcomics', 'enable_airdcpp', 'jd2_enable', 'enable_external_server', 'ddl_prefer_upscaled', 'deluge_pause',
+                           'enable_nav_menu'] #enable_public
 
         for checked_config in checked_configs:
             if checked_config not in kwargs:
