@@ -148,6 +148,8 @@ _CONFIG_DEFINITIONS = OrderedDict({
     'ALPHAINDEX': (bool, 'Interface', True),
     'CHERRYPY_LOGGING': (bool, 'Interface', False),
     'INSTANCE_NAME': (str, 'Interface', None),
+    'ENABLE_ORPHANS': (bool, 'Interface', False),
+    'ORPHAN_SCAN_DIR': (str, 'Interface', None),
 
     'API_ENABLED' : (bool, 'API', False),
     'API_KEY' : (str, 'API', None),

@@ -10,6 +10,9 @@
 			<a id="menu_link_edit" href="manageIssues?status=Wanted">Manage Issues</a>
 			<a id="menu_link_edit" href="manageFailed">Manage Failed Links</a>
 			<a id="menu_link_edit" href="queueManage">Manage DDL Queue</a>
+%if mylar.CONFIG.ENABLE_ORPHANS:
+			<a id="menu_link_edit" href="orphans">Orphans</a>
+%endif
 		</div>
 	</div>	
 </%def>

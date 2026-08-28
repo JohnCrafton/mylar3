@@ -263,6 +263,15 @@
                                     <input type="text" name="instance_name" id="instance_name" value="${config['instance_name']}" size="30">
                                     <small>Use to add an additional string to the browser title</small>
                                 </div>
+                                <div class="row checkbox">
+                                    <input type="checkbox" name="enable_orphans" id="enable_orphans" value="1" ${config['enable_orphans']} /><label>Enable Orphan Workbench</label>
+                                    <small>Adds a page for identifying comic files that are not organised to any known standard.</small>
+                                </div>
+                                <div class="row">
+                                    <label>Orphan Scan Directory</label>
+                                    <input type="text" name="orphan_scan_dir" id="orphan_scan_dir" value="${config['orphan_scan_dir']}" size="40">
+                                    <small>Where to look for unorganised files. Nothing here is moved or altered.</small>
+                                </div>
                     		 </fieldset>
                          <fieldset>
                              <legend>Annual Handling</legend>

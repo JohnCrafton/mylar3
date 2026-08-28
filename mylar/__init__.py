@@ -149,6 +149,7 @@ SEARCHPOOL = None
 PPPOOL = None
 DDLPOOL = None
 JD2POOL = None
+ORPHAN_SCAN_RUNNING = False
 SNATCHED_QUEUE = queue.Queue()
 NZB_QUEUE = queue.Queue()
 PP_QUEUE = queue.Queue()
@@ -256,7 +257,7 @@ def initialize(config_file):
     with INIT_LOCK:
 
         global CONFIG, _INITIALIZED, QUIET, CONFIG_FILE, MINIMUM_PY_VERSION, OS_DETECT, MAINTENANCE, CURRENT_VERSION, LATEST_VERSION, COMMITS_BEHIND, INSTALL_TYPE, IMPORTLOCK, PULLBYFILE, INKDROPS_32P, \
-               DONATEBUTTON, CURRENT_WEEKNUMBER, CURRENT_YEAR, UMASK, USER_AGENT, SNATCHED_QUEUE, NZB_QUEUE, PP_QUEUE, SEARCH_QUEUE, DDL_QUEUE, JD2_QUEUE, PULLNEW, COMICSORT, WANTED_TAB_OFF, CV_HEADERS, \
+               DONATEBUTTON, CURRENT_WEEKNUMBER, CURRENT_YEAR, UMASK, USER_AGENT, SNATCHED_QUEUE, NZB_QUEUE, PP_QUEUE, SEARCH_QUEUE, DDL_QUEUE, JD2_QUEUE, ORPHAN_SCAN_RUNNING, PULLNEW, COMICSORT, WANTED_TAB_OFF, CV_HEADERS, \
                IMPORTBUTTON, IMPORT_FILES, IMPORT_TOTALFILES, IMPORT_CID_COUNT, IMPORT_PARSED_COUNT, IMPORT_FAILURE_COUNT, CHECKENABLED, CVURL, DEMURL, EXPURL, WWTURL, WWT_CF_COOKIEVALUE, \
                DDLPOOL, JD2POOL, NZBPOOL, SNPOOL, PPPOOL, SEARCHPOOL, RETURN_THE_NZBQUEUE, MASS_ADD, ADD_LIST, MASS_REFRESH, REFRESH_QUEUE, SSE_KEY, \
                USE_SABNZBD, USE_NZBGET, USE_BLACKHOLE, USE_RTORRENT, USE_UTORRENT, USE_QBITTORRENT, USE_DELUGE, USE_TRANSMISSION, USE_WATCHDIR, SAB_PARAMS, PUBLISHER_IMPRINTS, \
@@ -862,6 +863,13 @@ def dbcheck():
     c.execute('CREATE TABLE IF NOT EXISTS tmp_searches (query_id INTEGER, comicid INTEGER, comicname TEXT, publisher TEXT, publisherimprint TEXT, comicyear TEXT, issues TEXT, volume TEXT, deck TEXT, url TEXT, type TEXT, cvarcid TEXT, arclist TEXT, description TEXT, haveit TEXT, mode TEXT, searchtype TEXT, comicimage TEXT, thumbimage TEXT, PRIMARY KEY (query_id, comicid))')
     c.execute('CREATE TABLE IF NOT EXISTS notifs(session_id INT, date TEXT, event TEXT, comicid TEXT, comicname TEXT, issuenumber TEXT, seriesyear TEXT, status TEXT, message TEXT, PRIMARY KEY (session_id, date))')
     c.execute('CREATE TABLE IF NOT EXISTS provider_searches(id INTEGER UNIQUE, provider TEXT UNIQUE, type TEXT, lastrun INTEGER, active TEXT, hits INTEGER DEFAULT 0)')
+    c.execute('CREATE TABLE IF NOT EXISTS orphans(OrphanID TEXT UNIQUE, FilePath TEXT UNIQUE, FileName TEXT, FileSize INTEGER, PageCount INTEGER, ParsedSeries TEXT, ParsedIssue TEXT, ParsedYear TEXT, ParsedVolume TEXT, BookType TEXT, HasComicInfo INTEGER, ComicInfoSeries TEXT, TotalIssues INTEGER, CVSuggestions TEXT, Status TEXT, ScanDate TEXT, ComicID TEXT, IssueID TEXT)')
+    c.execute('CREATE INDEX IF NOT EXISTS idx_orphans_status ON orphans (Status, FileName)')
+
+    try:
+        c.execute('SELECT TotalIssues from orphans')
+    except sqlite3.OperationalError:
+        c.execute('ALTER TABLE orphans ADD COLUMN TotalIssues INTEGER')
     c.execute('CREATE TABLE IF NOT EXISTS mylar_info(DatabaseVersion INTEGER PRIMARY KEY)')
     conn.commit()
 
