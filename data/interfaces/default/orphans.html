@@ -1,0 +1,556 @@
+<%inherit file="base.html"/>
+<%!
+	import mylar
+%>
+
+<%def name="headerIncludes()">
+	<div id="subhead_container">
+		<div id="subhead_menu">
+%if mylar.CONFIG.ENABLE_ORPHANS:
+			<a id="menu_link_scan" href="#" onclick="scanOrphans();return false;">Scan for Orphans</a>
+%endif
+			<a id="menu_link_new" href="importResults">Import Results</a>
+			<a id="menu_link_edit" href="config">Settings</a>
+		</div>
+	</div>
+</%def>
+
+<%def name="body()">
+        <input type="hidden" id="page_name" value="orphans" />
+	<div id="paddingheader">
+		<h1 class="clearfix">Orphans</h1>
+	</div>
+
+%if not mylar.CONFIG.ENABLE_ORPHANS:
+        <div class="table_wrapper">
+            <p style="text-align:center;">
+                The orphan workbench is switched off.<br/>
+                Turn on <strong>Enable Orphan Workbench</strong> under
+                <a href="config">Settings &rarr; Web Interface</a> and set a directory to scan.
+            </p>
+        </div>
+%else:
+        <div class="table_wrapper" id="orphans_table_wrapper">
+            <p style="text-align:center;">
+                Files here are not organised to a known standard. Look inside one, find
+                what it is on ComicVine, and record the match.
+%if mylar.CONFIG.ORPHAN_SCAN_DIR:
+                <br/><small>Scanning: ${mylar.CONFIG.ORPHAN_SCAN_DIR}</small>
+%else:
+                <br/><small>No scan directory set yet - add one under Settings &rarr; Web Interface.</small>
+%endif
+            </p>
+            <table class="display" id="orphans_table" style="width:100%;">
+                <thead>
+                    <tr>
+                        <th id="file" style="text-align:center;">File</th>
+                        <th id="series" style="width:170px;text-align:center;">Reads as</th>
+                        <th id="issue" style="width:60px;text-align:center;">Issue</th>
+                        <th id="year" style="width:60px;text-align:center;">Year</th>
+                        <th id="pages" style="width:60px;text-align:center;">Pages</th>
+                        <th id="status" style="width:90px;text-align:center;">Status</th>
+                        <th id="options" style="width:170px;text-align:center;">Options</th>
+                    </tr>
+                </thead>
+                <tbody></tbody>
+            </table>
+        </div>
+
+        <div id="orphan_identify_dialog" title="Identify this file" style="display:none" class="configtable">
+            <div id="orphan_identify_body"></div>
+        </div>
+
+        <div id="orphan_file_dialog" title="File this issue" style="display:none" class="configtable">
+            <div id="orphan_file_body"></div>
+        </div>
+%endif
+</%def>
+
+<%def name="headIncludes()">
+        <style>
+        /* Dialog tables deliberately avoid class="display": base.html's
+           reload_table() runs $('table.display').DataTable().ajax.reload()
+           across the whole page, which drags any table carrying that class
+           into DataTables and then asks it to reload from an ajax source it
+           does not have. */
+        table.orphan_panel { border-collapse: collapse; }
+        table.orphan_panel th,
+        table.orphan_panel td { padding: 4px 8px; vertical-align: top; }
+        table.orphan_panel thead th { border-bottom: 1px solid #555; text-align: left; }
+        table.orphan_panel tbody tr:nth-child(even) { background: rgba(127,127,127,.07); }
+        </style>
+</%def>
+
+<%def name="javascriptIncludes()">
+	<script src="js/libs/jquery.dataTables.min.js"></script>
+        <script>
+%if mylar.CONFIG.ENABLE_ORPHANS:
+        $.fn.DataTable.ext.pager.numbers_length = 3;
+        var currentOrphan = null;
+        var currentPlan = null;
+        var currentIssueID = null;
+
+        // The file's own cover, so a candidate can be checked against what is
+        // actually inside rather than against its title alone.
+        function showOwnCover(target, orphanid, caption){
+                $.getJSON('orphanCover', {OrphanID: orphanid}, function(data){
+                        if (!data.image){
+                                $(target).html('<small style="opacity:.7;">' +
+                                        esc(data.error || 'No cover available') + '</small>');
+                                return;
+                        }
+                        $(target).html('<div style="text-align:center;">' +
+                                '<img src="' + esc(data.image) + '" alt="" ' +
+                                'style="max-height:190px;max-width:130px;border:1px solid #444;" />' +
+                                '<br/><small style="opacity:.75;">' + esc(caption) + '</small></div>');
+                });
+        }
+
+        function esc(text){
+                return $('<div/>').text(text === null || text === undefined ? '' : text).html();
+        }
+
+        function scanOrphans(){
+                $('#ajaxMsg').html("<div class='msg'>Scanning&hellip;</div>").addClass('success').fadeIn();
+                $.getJSON('orphanScan', function(data){
+                        $('#ajaxMsg').html("<div class='msg'>" + esc(data.message) + "</div>");
+                        $('#ajaxMsg').fadeIn().delay(4000).fadeOut();
+                        // the scan runs in the background, so give it a moment
+                        // before asking for the results
+                        setTimeout(function(){ $('#orphans_table').DataTable().ajax.reload(null, false); }, 4000);
+                });
+        }
+
+        // Delegated from document: the dialog's contents are replaced on every
+        // search, so a handler bound directly to the inputs would not survive.
+        $(document).delegate('.orphan_search_field', 'keydown', function(event){
+                if (event.which === 13){
+                        event.preventDefault();
+                        identifyOrphan(currentOrphan, searchFields());
+                }
+        });
+
+        // Whatever is in the dialog's fields right now. Blank means "no view",
+        // so those keys are omitted rather than sent empty - the server then
+        // falls back to what was read off the file.
+        function searchFields(){
+                var opts = {};
+                var name  = $.trim($('#orphan_search').val() || '');
+                var issue = $.trim($('#orphan_issue').val() || '');
+                var year  = $.trim($('#orphan_year').val() || '');
+                var total = $.trim($('#orphan_total').val() || '');
+                if (name)  { opts.name = name; }
+                if (issue) { opts.issue = issue; }
+                if (year)  { opts.year = year; }
+                if (total) { opts.total = total; }
+                return opts;
+        }
+
+        function identifyOrphan(orphanid, opts){
+                currentOrphan = orphanid;
+                var body = $('#orphan_identify_body');
+                body.html('<p>Asking ComicVine&hellip;</p>');
+                $('#orphan_identify_dialog').dialog({modal: true, width: "70%", maxHeight: 600});
+
+                var params = {OrphanID: orphanid};
+                opts = opts || {};
+                if (opts.name)  { params.name = opts.name; }
+                if (opts.issue) { params.issue = opts.issue; }
+                if (opts.year)  { params.year = opts.year; }
+                if (opts.total) { params.total = opts.total; }
+
+                $.getJSON('orphanCandidates', params, function(data){
+                        // Issue number and run length are not just display:
+                        // ComicVine drops series too short to hold the issue,
+                        // and a declared run of 12 rules out every ongoing.
+                        var html = '<div style="margin-bottom:10px;">' +
+                                   '<label>Series</label> ' +
+                                   '<input type="text" class="orphan_search_field" id="orphan_search" size="26" value="' + esc(data.query || '') + '" />' +
+                                   ' <label>Issue</label> ' +
+                                   '<input type="text" class="orphan_search_field" id="orphan_issue" size="4" value="' + esc(data.issue || '') + '" />' +
+                                   ' <label>of</label> ' +
+                                   '<input type="text" class="orphan_search_field" id="orphan_total" size="4" value="' + esc(data.total || '') + '" />' +
+                                   ' <label>Year</label> ' +
+                                   '<input type="text" class="orphan_search_field" id="orphan_year" size="5" value="' + esc(data.year || '') + '" />' +
+                                   ' <input type="button" value="Search" onclick="identifyOrphan(currentOrphan, searchFields());" />' +
+                                   '<br/><small>Issue and run length narrow the search - "of 12" rules out ongoing series.</small>' +
+                                   '</div>';
+                        if (data.error){
+                                body.html(html + '<p>' + esc(data.error) + '</p>');
+                                $('#orphan_search').focus();
+                                return;
+                        }
+                        if (!data.candidates.length){
+                                body.html(html + '<p>Nothing came back for that name.</p>');
+                                $('#orphan_search').focus();
+                                return;
+                        }
+                        html += '<div id="orphan_own_cover" style="float:left;margin:0 12px 8px 0;"></div>';
+                        html += '<table class="orphan_panel" style="width:100%"><thead><tr>' +
+                                '<th>Match</th><th>Cover</th><th>Series</th><th>Kind</th>' +
+                                '<th>Year</th><th>Issues</th><th>Why</th><th></th>' +
+                                '</tr></thead><tbody>';
+                        for (var i = 0; i < data.candidates.length; i++){
+                                var c = data.candidates[i];
+                                var suggested = (data.suggested !== null && c.comicid === data.suggested);
+                                html += '<tr' + (suggested ? ' style="font-weight:bold;"' : '') + '>';
+                                html += '<td style="text-align:center;">' + esc(c.score) + '%' +
+                                        (suggested ? '<br/><small>best guess</small>' : '') + '</td>';
+                                html += '<td style="text-align:center;">' +
+                                        (c.image ? '<img src="' + esc(c.image) + '" alt="" ' +
+                                                   'style="max-height:80px;max-width:56px;" />'
+                                                 : '<small style="opacity:.6;">none</small>') + '</td>';
+                                html += '<td>' + esc(c.name) + '<br/><small>' + esc(c.publisher || '') + '</small></td>';
+                                // a collected edition and a run of issues share a name;
+                                // this is the column that tells them apart
+                                html += '<td style="text-align:center;"><small>' + esc(c.type || '') + '</small></td>';
+                                html += '<td style="text-align:center;">' + esc(c.year) + '</td>';
+                                html += '<td style="text-align:center;">' + esc(c.issues) + '</td>';
+                                html += '<td><small>' + (c.reasons || []).map(esc).join('<br/>') + '</small></td>';
+                                html += '<td style="text-align:center;"><a href="#" onclick="assignOrphan(\'' +
+                                        esc(orphanid) + '\',\'' + esc(c.comicid) + '\');return false;">Use this</a></td>';
+                                html += '</tr>';
+                        }
+                        body.html(html + '</tbody></table>');
+                        showOwnCover('#orphan_own_cover', orphanid,
+                                     'The cover of the file you are identifying');
+                        $('#orphan_search').focus();
+                });
+        }
+
+        function assignOrphan(orphanid, comicid){
+                $.getJSON('orphanAssign', {OrphanID: orphanid, ComicID: comicid}, function(data){
+                        $('#orphan_identify_dialog').dialog('close');
+                        $('#ajaxMsg').html("<div class='msg'>" + esc(data.message) + "</div>").addClass('success').fadeIn().delay(3000).fadeOut();
+                        $('#orphans_table').DataTable().ajax.reload(null, false);
+                });
+        }
+
+        // Preview first, always: this is the only part of the workbench that
+        // touches files, so nothing happens until the user has seen the paths.
+        // keepName / writeMeta are carried through because re-previewing
+        // rebuilds the dialog, which would otherwise clear the boxes the user
+        // just ticked.
+        function previewFiling(orphanid, keepName, writeMeta, issueid){
+                if (orphanid !== currentOrphan){ currentIssueID = null; }
+                currentOrphan = orphanid;
+                if (issueid !== undefined){ currentIssueID = issueid; }
+                var body = $('#orphan_file_body');
+                body.html('<p>Working out what would happen&hellip;</p>');
+                $('#orphan_file_dialog').dialog({modal: true, width: "60%", maxHeight: 520});
+
+                var args = {OrphanID: orphanid};
+                if (keepName){ args.keep_name = '1'; }
+                if (currentIssueID){ args.issueid = currentIssueID; }
+                $.getJSON('orphanFilePreview', args, function(plan){
+                        if (plan.blockers && plan.blockers.length){
+                                var html = '<p>This cannot be filed yet:</p><ul>';
+                                var offerAdd = false;
+                                for (var i = 0; i < plan.blockers.length; i++){
+                                        html += '<li>' + esc(plan.blockers[i].message) + '</li>';
+                                        if (plan.blockers[i].code === 'series_not_watched'){ offerAdd = true; }
+                                }
+                                html += '</ul>';
+                                if (offerAdd){
+                                        html += '<p><input type="button" value="Add the series to my watchlist"' +
+                                                ' onclick="addOrphanSeries(\'' + esc(orphanid) + '\');" /></p>' +
+                                                '<p><small>Choosing which issue this is becomes available once the' +
+                                                ' series is on the watchlist &mdash; the issue list comes from there.' +
+                                                '</small></p>';
+                                }
+                                body.html(html);
+                                return;
+                        }
+
+                        currentPlan = plan;
+
+                        var nameCell = plan.renamed
+                              ? '<span style="opacity:.7;">' + esc(plan.original_name) + '</span>' +
+                                arrow() + '<strong>' + esc(plan.destination_name) + '</strong>'
+                              : esc(plan.destination_name) +
+                                ' <small style="opacity:.7;">(unchanged)</small>';
+
+                        var html = '<div style="overflow:hidden;margin-bottom:10px;">' +
+                                   '<div id="orphan_file_cover" style="float:left;margin-right:14px;"></div>' +
+                                   '<div id="orphan_issue_cover" style="float:left;"></div>' +
+                                   '</div>';
+
+                        html += '<table class="orphan_panel" style="width:100%"><tbody>' +
+                                   row('Series',   esc(plan.series) + ' (' + esc(plan.series_year) + ')') +
+                                   '<tr><td><strong>Issue</strong></td><td id="orphan_issue_cell">' +
+                                        '<strong>#' + esc(plan.issue) + '</strong>' +
+                                        (plan.issue_source === 'filename'
+                                            ? ' <span style="opacity:.75;">&mdash; guessed from the filename</span>'
+                                            : '') +
+                                        ' <input type="button" value="Choose a different issue"' +
+                                        ' onclick="openIssuePicker();" style="margin-left:6px;" />' +
+                                        '<div id="orphan_issue_picker" style="display:none;margin-top:6px;"></div>' +
+                                        '</td></tr>' +
+                                   row('Filename', nameCell) +
+                                   row('Folder',   '<span style="opacity:.7;">' + esc(plan.source_dir) + '</span>' +
+                                                   arrow() + '<strong>' + esc(plan.destination_dir) + '</strong>') +
+                                   '<tr><td><strong>Action</strong></td><td id="orphan_action_cell"></td></tr>' +
+                                   '<tr><td><strong>Disk</strong></td><td id="orphan_disk_cell"></td></tr>' +
+                                   row('Original', 'Stays at ' + esc(plan.source) + ', either way') +
+                                   '</tbody></table>';
+
+                        for (var w = 0; w < (plan.warnings || []).length; w++){
+                                html += '<p style="margin:6px 0;padding:6px;border-left:3px solid #c98a3a;">' +
+                                        '<strong>Check this:</strong> ' + esc(plan.warnings[w].message) + '</p>';
+                        }
+
+                        html += '<p><label><input type="checkbox" id="orphan_keep_name" value="1" />' +
+                                ' Keep the original filename</label>' +
+                                '<br/><small>Otherwise it is renamed to your file format' +
+                                ' &mdash; the same convention the rest of your library uses.</small></p>';
+
+                        if (plan.metadata_available){
+                                html += '<p><label><input type="checkbox" id="orphan_write_meta" value="1" />' +
+                                        ' Write metadata into the filed file</label>' +
+                                        '<br/><small>Tagging rewrites the archive, so this must be a real copy' +
+                                        ' rather than a hardlink - the original cannot be left untouched otherwise.' +
+                                        ' Ticking it changes the action and disk cost above.' +
+                                        '<br/>This choice applies to this file only. Your default is <strong>' +
+                                        (plan.metadata_default ? 'on' : 'off') + '</strong>' +
+                                        ' (<a href="config">Settings &rarr; Quality &amp; Post Processing</a>).' +
+                                        '</small></p>';
+                        } else {
+                                html += '<p><small>No metadata tag format is selected in' +
+                                        ' <a href="config">Settings &rarr; Quality &amp; Post Processing</a>' +
+                                        ' (ComicRack or ComicBookLover), so there is nothing to write.' +
+                                        ' This file will be filed untagged.</small></p>';
+                        }
+
+                        html += '<p><input type="button" value="File it" onclick="confirmFiling(\'' + esc(orphanid) + '\');" />' +
+                                ' <input type="button" value="Cancel" onclick="$(\'#orphan_file_dialog\').dialog(\'close\');" /></p>';
+                        body.html(html);
+                        if (keepName){ $('#orphan_keep_name').prop('checked', true); }
+                        // writeMeta is undefined on a first open, so fall back to
+                        // the configured default rather than always starting off
+                        var meta = (writeMeta === undefined) ? !!plan.metadata_default : !!writeMeta;
+                        if (meta){ $('#orphan_write_meta').prop('checked', true); }
+                        updateDiskCost();
+                        showOwnCover('#orphan_file_cover', orphanid, 'This file');
+                        if (plan.issue_image){
+                                $('#orphan_issue_cover').html('<div style="text-align:center;">' +
+                                        '<img src="' + esc(plan.issue_image) + '" alt="" ' +
+                                        'style="max-height:190px;max-width:130px;border:1px solid #444;" />' +
+                                        '<br/><small style="opacity:.75;">#' + esc(plan.issue) +
+                                        (plan.issue_name ? ' &mdash; ' + esc(plan.issue_name) : '') +
+                                        '</small></div>');
+                        } else {
+                                $('#orphan_issue_cover').html('<small style="opacity:.7;">' +
+                                        'No cover on record for #' + esc(plan.issue) + '</small>');
+                        }
+                        // If the issue is only a guess, the choice is the whole
+                        // point of this dialog - so open the picker rather than
+                        // leaving it behind a button the user has to notice.
+                        if (plan.issue_source === 'filename'){
+                                openIssuePicker();
+                        }
+                });
+        }
+
+        // Glyphs drawn inline so they need no assets. Each carries a <title>
+        // for hover; the sentence beside it says the same thing in words, so
+        // the icon is never the only carrier of meaning.
+        function svgIcon(title, body){
+                return '<svg width="13" height="13" viewBox="0 0 16 16" style="vertical-align:-2px;" ' +
+                       'role="img"><title>' + esc(title) + '</title>' + body + '</svg>';
+        }
+
+        function driveIcon(title){
+                return svgIcon(title,
+                       '<rect x="1" y="4" width="14" height="8" rx="1.5" fill="none" stroke="currentColor"/>' +
+                       '<circle cx="11.5" cy="8" r="1.4" fill="currentColor"/>' +
+                       '<line x1="3" y1="8" x2="8" y2="8" stroke="currentColor"/>');
+        }
+
+        // chain links - one set of bytes, two names
+        function linkIcon(title){
+                return svgIcon(title,
+                       '<path d="M6.5 9.5a2.5 2.5 0 0 1 0-3.5l1.5-1.5a2.5 2.5 0 0 1 3.5 3.5l-.8.8" ' +
+                       'fill="none" stroke="currentColor" stroke-width="1.4"/>' +
+                       '<path d="M9.5 6.5a2.5 2.5 0 0 1 0 3.5L8 11.5a2.5 2.5 0 0 1-3.5-3.5l.8-.8" ' +
+                       'fill="none" stroke="currentColor" stroke-width="1.4"/>');
+        }
+
+        // two sheets - a second, independent set of bytes
+        function copyIcon(title){
+                return svgIcon(title,
+                       '<rect x="2" y="2" width="8" height="10" rx="1" fill="none" stroke="currentColor"/>' +
+                       '<rect x="6" y="4" width="8" height="10" rx="1" fill="none" stroke="currentColor"/>');
+        }
+
+        function arrow(){
+                return ' <span style="opacity:.6;">&rarr;</span> ';
+        }
+
+        // Recomputed rather than fetched again: the preview sends both variants
+        // so ticking the box updates immediately.
+        function updateDiskCost(){
+                if (!currentPlan){ return; }
+                var meta = $('#orphan_write_meta').is(':checked');
+                var placement = meta ? currentPlan.placement_with_metadata : currentPlan.placement;
+                var bytes = meta ? currentPlan.duplicate_bytes_with_metadata : currentPlan.duplicate_bytes;
+                var size = currentPlan.size_human || 'unknown size';
+
+                if (placement === 'hardlink'){
+                        $('#orphan_action_cell').html(
+                                linkIcon('Hardlink: a second name for one set of bytes.') +
+                                ' <strong>Hardlink</strong> &mdash; one set of bytes under two names.' +
+                                '<br/><small>The new name is free: a name belongs to the folder entry,' +
+                                ' not to the file itself. Only changing the file&rsquo;s <em>contents</em>' +
+                                ' &mdash; writing metadata &mdash; would need a real copy.</small>');
+                        $('#orphan_disk_cell').html(
+                                driveIcon('Nothing is duplicated.') +
+                                ' <strong>No extra space</strong> &mdash; ' + esc(size) + ' on disk, once.');
+                } else {
+                        var why = meta ? 'needed to tag the filed file without altering the original'
+                                       : 'the two paths are on different filesystems, so a hardlink is not possible';
+                        $('#orphan_action_cell').html(
+                                copyIcon('Copy: a second, independent set of bytes.') +
+                                ' <strong>Copy</strong> &mdash; ' + why + '.');
+                        $('#orphan_disk_cell').html(
+                                driveIcon('The same data is stored twice.') +
+                                ' <strong>+' + esc(bytes === 0 || bytes === null ? size : size) + '</strong>' +
+                                ' &mdash; the data is stored twice.');
+                }
+        }
+
+        $(document).delegate('#orphan_write_meta', 'change', updateDiskCost);
+        // the filename row depends on this, so ask the server again rather than
+        // guessing what the rename would have produced
+        $(document).delegate('#orphan_keep_name', 'change', function(){
+                previewFiling(currentOrphan, $(this).is(':checked'),
+                              $('#orphan_write_meta').is(':checked'));
+        });
+
+        function row(label, value){
+                return '<tr><td style="width:120px;"><strong>' + label + '</strong></td><td>' + value + '</td></tr>';
+        }
+
+        // The issue list, searchable by name as well as number - the story is
+        // how someone knows it, the number is how Mylar knows it.
+        function openIssuePicker(){
+                var box = $('#orphan_issue_picker');
+                if (box.is(':visible')){ box.hide(); return; }
+                box.show().html('<p>Loading issues&hellip;</p>');
+                loadIssueChoices('');
+        }
+
+        function loadIssueChoices(query){
+                $.getJSON('orphanIssues', {OrphanID: currentOrphan, q: query}, function(data){
+                        var box = $('#orphan_issue_picker');
+                        if (data.error){ box.html('<p>' + esc(data.error) + '</p>'); return; }
+
+                        var html = '<input type="text" id="orphan_issue_filter" size="26" ' +
+                                   'placeholder="Filter by number or story name&hellip;" value="' + esc(query || '') + '" />' +
+                                   ' <small>' + esc(data.issues.length) + ' of ' + esc(data.total) + '</small>' +
+                                   '<div style="max-height:180px;overflow-y:auto;margin-top:4px;">';
+                        if (!data.issues.length){
+                                html += '<p>Nothing matches that.</p>';
+                        }
+                        for (var i = 0; i < data.issues.length; i++){
+                                var iss = data.issues[i];
+                                var guess = (iss.issueid === data.filename_guess);
+                                html += '<div style="padding:3px 0;clear:both;">' +
+                                        (iss.image ? '<img src="' + esc(iss.image) + '" alt="" ' +
+                                                     'style="max-height:44px;max-width:30px;vertical-align:middle;' +
+                                                     'margin-right:6px;border:1px solid #444;" />' : '') +
+                                        '<a href="#" onclick="chooseIssue(\'' + esc(iss.issueid) + '\');return false;">' +
+                                        '#' + esc(iss.number) + (iss.name ? ' &mdash; ' + esc(iss.name) : '') +
+                                        '</a>' +
+                                        (iss.date ? ' <small style="opacity:.6;">' + esc(iss.date) + '</small>' : '') +
+                                        (guess ? ' <small style="opacity:.75;">(what the filename implies)</small>' : '') +
+                                        '</div>';
+                        }
+                        box.html(html + '</div>');
+                });
+        }
+
+        $(document).delegate('#orphan_issue_filter', 'keyup input', function(){
+                var self = this;
+                clearTimeout(window._orphanIssueTimer);
+                // typed queries hit the database, so wait for a pause
+                window._orphanIssueTimer = setTimeout(function(){
+                        loadIssueChoices($(self).val());
+                }, 250);
+        });
+
+        function chooseIssue(issueid){
+                previewFiling(currentOrphan,
+                              $('#orphan_keep_name').is(':checked'),
+                              $('#orphan_write_meta').is(':checked'),
+                              issueid);
+        }
+
+        function confirmFiling(orphanid){
+                var meta = $('#orphan_write_meta').is(':checked') ? '1' : '0';
+                var keep = $('#orphan_keep_name').is(':checked') ? '1' : '0';
+                $('#orphan_file_body').html('<p>Filing&hellip;</p>');
+                var args = {OrphanID: orphanid, write_metadata: meta, keep_name: keep};
+                if (currentIssueID){ args.issueid = currentIssueID; }
+                $.getJSON('orphanFileConfirm', args, function(data){
+                        $('#orphan_file_dialog').dialog('close');
+                        $('#ajaxMsg').html("<div class='msg'>" + esc(data.message) + "</div>")
+                                     .addClass(data.status === 'success' ? 'success' : 'error')
+                                     .fadeIn().delay(5000).fadeOut();
+                        $('#orphans_table').DataTable().ajax.reload(null, false);
+                });
+        }
+
+        function addOrphanSeries(orphanid){
+                $('#orphan_file_body').html('<p>Adding the series&hellip;</p>');
+                $.getJSON('orphanAddSeries', {OrphanID: orphanid}, function(data){
+                        $('#orphan_file_body').html('<p>' + esc(data.message) + '</p>');
+                });
+        }
+
+        function ignoreOrphan(orphanid){
+                $.getJSON('orphanIgnore', {OrphanID: orphanid}, function(data){
+                        $('#orphans_table').DataTable().ajax.reload(null, false);
+                });
+        }
+
+        function initThisPage(){
+            $('#orphans_table').dataTable({
+                "destroy": true,
+                "sDom": '<"clear"f><"clear"lp><"clear">rt<"clear"ip>',
+                "processing": true,
+                "serverSide": true,
+                "ajaxSource": 'loadOrphans',
+                "columnDefs": [
+                    { "targets": [0], "render": function(d,t,full){
+                        return '<span title="' + esc(full[8]) + '">' + esc(full[0]) + '</span>' +
+                               '<br/><small>' + esc(full[7]) + '</small>'; } },
+                    { "targets": [1], "render": function(d,t,full){ return esc(full[1]); } },
+                    { "targets": [2], "render": function(d,t,full){ return esc(full[2]); } },
+                    { "targets": [3], "render": function(d,t,full){ return esc(full[3]); } },
+                    { "targets": [4], "render": function(d,t,full){ return esc(full[4]); } },
+                    { "targets": [5], "render": function(d,t,full){ return esc(full[5]); } },
+                    { "sortable": false, "targets": [6], "render": function(d,t,full){
+                        var opts = '<a href="read_orphan?OrphanID=' + esc(full[6]) + '">Look inside</a>' +
+                                   ' | <a href="#" onclick="identifyOrphan(\'' + esc(full[6]) + '\');return false;">Identify</a>';
+                        if (full[5] === 'identified'){
+                                opts += ' | <a href="#" onclick="previewFiling(\'' + esc(full[6]) + '\');return false;">File it</a>';
+                        }
+                        opts += ' | <a href="#" onclick="ignoreOrphan(\'' + esc(full[6]) + '\');return false;">Ignore</a>';
+                        return opts; } }
+                ],
+                "oLanguage": {
+                    "sEmptyTable": "No orphans recorded - run a scan",
+                    "sSearch": "Filter: ",
+                    "sInfo": "Showing _START_ to _END_ of _TOTAL_ files",
+                    "sInfoEmpty": "Showing 0 to 0 of 0 files"
+                }
+            });
+        }
+
+        $(document).ready(function(){
+                initThisPage();
+        });
+%endif
+        $(document).ready(function(){ initActions(); });
+        </script>
+</%def>

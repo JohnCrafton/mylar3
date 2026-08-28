@@ -1,0 +1,44 @@
+<%inherit file="base.html"/>
+<%!
+	import mylar
+%>
+
+<%def name="headerIncludes()">
+	<div id="subhead_container">
+		<div id="subhead_menu">
+			<a id="menu_link_new" href="orphans">Back to Orphans</a>
+		</div>
+	</div>
+</%def>
+
+<%def name="body()">
+	<div id="paddingheader">
+		<h1 class="clearfix">${orphan['FileName']}</h1>
+	</div>
+	<div class="table_wrapper" style="text-align:center;">
+%if not images:
+		<p>Nothing could be extracted from this file - it may be corrupt, or a format the reader cannot open.</p>
+%else:
+		<p>
+			Page ${page_num + 1} of ${len(images)}
+%if page_num > 0:
+			&nbsp;<a href="read_orphan?OrphanID=${orphan['OrphanID']}&page_num=${page_num - 1}">&larr; Previous</a>
+%endif
+%if page_num + 1 < len(images):
+			&nbsp;<a href="read_orphan?OrphanID=${orphan['OrphanID']}&page_num=${page_num + 1}">Next &rarr;</a>
+%endif
+		</p>
+		<img src="${images[page_num]}" style="max-width:100%;height:auto;" alt="page ${page_num + 1}" />
+%endif
+	</div>
+</%def>
+
+<%def name="headIncludes()">
+</%def>
+
+<%def name="javascriptIncludes()">
+        <script>
+        // styles the subhead links as buttons, the same as every other page
+        $(document).ready(function(){ initActions(); });
+        </script>
+</%def>

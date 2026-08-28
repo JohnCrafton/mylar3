@@ -151,6 +151,8 @@ _CONFIG_DEFINITIONS = OrderedDict({
     'ENABLE_NAV_MENU': (bool, 'Interface', False),
     'ENABLE_ISSUE_EVENTS': (bool, 'Interface', False),
     'ISSUE_EVENTS_RETENTION_DAYS': (int, 'Interface', 60),
+    'ENABLE_ORPHANS': (bool, 'Interface', False),
+    'ORPHAN_SCAN_DIR': (str, 'Interface', None),
 
     'API_ENABLED' : (bool, 'API', False),
     'API_KEY' : (str, 'API', None),

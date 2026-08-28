@@ -40,6 +40,7 @@ import traceback
 import time
 import random
 import threading
+import uuid
 import csv
 import platform
 import urllib.request, urllib.parse, urllib.error
@@ -68,6 +69,7 @@ from mylar import (
     moveit,
     navmenu,
     notifiers,
+    orphans as orphanlib,
     parseit,
     PostProcessor,
     readinglist,
@@ -1165,6 +1167,542 @@ class WebInterface(object):
             'aaData': aa,
         })
     loadActivity.exposed = True
+
+    def orphans(self, **kwargs):
+        # **kwargs so a stray cache-busting parameter is ignored rather than
+        # 404ing - DataTables appends ?_=<timestamp> when it has no ajax
+        # source of its own, which is how this surfaced
+        return serve_template(templatename="orphans.html", title="Orphans")
+    orphans.exposed = True
+
+    def loadOrphans(self, iDisplayStart=0, iDisplayLength=100, iSortCol_0=0,
+                    sSortDir_0="asc", sSearch="", **kwargs):
+        if not mylar.CONFIG.ENABLE_ORPHANS:
+            return json.dumps({'iTotalDisplayRecords': 0, 'iTotalRecords': 0,
+                               'aaData': []})
+
+        myDB = db.DBConnection()
+        rows = myDB.select('SELECT * FROM orphans ORDER BY Status, FileName')
+        results = []
+        for row in rows:
+            if sSearch and sSearch.lower() not in (row['FileName'] or '').lower():
+                continue
+            results.append([
+                row['FileName'],
+                row['ParsedSeries'],
+                row['ParsedIssue'],
+                row['ParsedYear'],
+                row['PageCount'],
+                row['Status'],
+                row['OrphanID'],
+                helpers.human_size(row['FileSize']) if row['FileSize'] else '',
+                row['FilePath'],
+            ])
+
+        total = len(rows)
+        iDisplayStart = int(iDisplayStart)
+        iDisplayLength = int(iDisplayLength)
+        page = results if iDisplayLength == -1 else results[iDisplayStart:iDisplayStart + iDisplayLength]
+        return json.dumps({'iTotalDisplayRecords': len(results),
+                           'iTotalRecords': total, 'aaData': page})
+    loadOrphans.exposed = True
+
+    def orphanScan(self, **kwargs):
+        """Walk the configured directory and record anything not already known."""
+        if not mylar.CONFIG.ENABLE_ORPHANS:
+            return json.dumps({'status': 'failure', 'message': 'Orphans is disabled'})
+
+        scan_dir = mylar.CONFIG.ORPHAN_SCAN_DIR
+        if not scan_dir:
+            return json.dumps({'status': 'failure',
+                               'message': 'No orphan scan directory configured'})
+
+        def scan():
+            myDB = db.DBConnection()
+            known = [r['FilePath'] for r in myDB.select('SELECT FilePath FROM orphans')]
+            mylar.ORPHAN_SCAN_RUNNING = True
+            try:
+                found = orphanlib.scan_directory(scan_dir, known_paths=known)
+                for record in found:
+                    record['OrphanID'] = str(uuid.uuid4())[:8]
+                    record['ScanDate'] = helpers.now()
+                    myDB.upsert('orphans', record, {'FilePath': record['FilePath']})
+                logger.info('[ORPHANS] Scan complete - %s new file(s) recorded'
+                            % len(found))
+            except Exception as e:
+                logger.error('[ORPHANS] Scan failed: %s' % e)
+            finally:
+                mylar.ORPHAN_SCAN_RUNNING = False
+
+        # Threaded: probing means decompressing every archive, so a large
+        # directory would otherwise hold the request open for minutes.
+        threading.Thread(target=scan, name='ORPHAN-SCAN').start()
+        return json.dumps({'status': 'success',
+                           'message': 'Scanning %s in the background' % scan_dir})
+    orphanScan.exposed = True
+
+    def orphanCandidates(self, OrphanID=None, name=None, issue=None,
+                         year=None, total=None, **kwargs):
+        """Look the orphan up on ComicVine and rank what comes back."""
+        if not mylar.CONFIG.ENABLE_ORPHANS:
+            return json.dumps({'candidates': [], 'error': 'Orphans is disabled'})
+
+        myDB = db.DBConnection()
+        row = myDB.selectone('SELECT * FROM orphans WHERE OrphanID=?', [OrphanID]).fetchone()
+        if row is None:
+            return json.dumps({'candidates': [], 'error': 'Unknown orphan'})
+
+        record = dict(row)
+        # an explicit search overrides what was parsed off the filename, which
+        # is the whole point when the filename is the thing that is wrong
+        # An explicit search is taken verbatim; a stored one is cleaned again so
+        # rows recorded before clean_series_query existed still search sensibly.
+        query = name or orphanlib.clean_series_query(record.get('ParsedSeries'))
+
+        # A request carrying 'name' came from the dialog, so its fields are the
+        # whole truth: a box the user cleared means "do not filter on this",
+        # and falling back to the file's value would make clearing it useless.
+        # An automatic open sends nothing, and uses what was read off the file.
+        manual = name is not None
+        parsed = orphanlib.to_parsed(record)
+        if manual:
+            parsed['issue'] = issue or None
+            parsed['year'] = year or None
+            parsed['issue_total'] = total or None
+        else:
+            if issue:
+                parsed['issue'] = issue
+            if year:
+                parsed['year'] = year
+            if total:
+                parsed['issue_total'] = total
+
+        echo = {'query': query, 'issue': parsed.get('issue'),
+                'year': parsed.get('year'), 'total': parsed.get('issue_total')}
+        if not query:
+            return json.dumps(dict(echo, candidates=[],
+                                   error='Nothing to search for - type a series name'))
+
+        if not mylar.CONFIG.COMICVINE_API:
+            # Without a key findComic just returns nothing, which reads as "no
+            # such series" rather than "Mylar cannot ask".
+            return json.dumps(dict(echo, candidates=[],
+                                   error='No ComicVine API key is set - add one'
+                                         ' under Settings, then search again.'))
+
+        # findComic already implements two filters that were going unused:
+        # 'issue' drops series too short to contain that issue number, and
+        # 'limityear' keeps only series whose run covers the year.
+        search_issue = parsed.get('issue')
+        search_year = parsed.get('year')
+
+        try:
+            results = mb.findComic(query, mode='series',
+                                   issue=orphanlib.as_search_issue(search_issue),
+                                   limityear=search_year)
+        except Exception as e:
+            logger.error('[ORPHANS] ComicVine lookup failed: %s' % e)
+            return json.dumps(dict(echo, candidates=[],
+                                   error='ComicVine lookup failed - see the log.'))
+
+        ranked = orphanlib.rank_candidates(parsed, results or [])
+        suggested = orphanlib.auto_selection(ranked)
+
+        myDB.upsert('orphans',
+                    {'CVSuggestions': json.dumps([{'comicid': c.get('comicid'),
+                                                   'score': c.get('score')}
+                                                  for c in ranked[:10]])},
+                    {'OrphanID': OrphanID})
+
+        return json.dumps(dict(
+            echo,
+            suggested=suggested.get('comicid') if suggested else None,
+            candidates=[{
+                'comicid': c.get('comicid'),
+                'name': c.get('name'),
+                'year': c.get('comicyear'),
+                'issues': c.get('issues'),
+                'publisher': c.get('publisher'),
+                # 'type' separates a run of issues from a collected edition,
+                # which is the distinction that is easiest to get wrong
+                'type': c.get('type'),
+                'volume': c.get('volume'),
+                'image': c.get('comicthumb') or c.get('comicimage'),
+                'score': c.get('score'),
+                'confidence': c.get('confidence'),
+                'reasons': c.get('reasons'),
+            } for c in ranked[:25]],
+        ))
+    orphanCandidates.exposed = True
+
+    def orphanAssign(self, OrphanID=None, ComicID=None, **kwargs):
+        """Record which series an orphan belongs to. Does not move anything."""
+        if not mylar.CONFIG.ENABLE_ORPHANS:
+            return json.dumps({'status': 'failure'})
+
+        myDB = db.DBConnection()
+        if not OrphanID or not ComicID:
+            return json.dumps({'status': 'failure', 'message': 'Missing ids'})
+
+        myDB.upsert('orphans', {'ComicID': ComicID, 'Status': 'identified'},
+                    {'OrphanID': OrphanID})
+        return json.dumps({'status': 'success', 'message': 'Identified'})
+    orphanAssign.exposed = True
+
+    def orphanIgnore(self, OrphanID=None, **kwargs):
+        if not mylar.CONFIG.ENABLE_ORPHANS:
+            return json.dumps({'status': 'failure'})
+        myDB = db.DBConnection()
+        myDB.upsert('orphans', {'Status': 'ignored'}, {'OrphanID': OrphanID})
+        return json.dumps({'status': 'success', 'message': 'Ignored'})
+    orphanIgnore.exposed = True
+
+    def _orphan_context(self, OrphanID, issue_number=None, issueid=None):
+        """The orphan, its series and the matching issue - or what is missing."""
+        myDB = db.DBConnection()
+        row = myDB.selectone('SELECT * FROM orphans WHERE OrphanID=?', [OrphanID]).fetchone()
+        if row is None:
+            return None, None, None, [{'code': 'unknown_orphan',
+                                       'message': 'Unknown orphan'}]
+
+        record = dict(row)
+        comic = None
+        issue = None
+
+        if record.get('ComicID'):
+            comic_row = myDB.selectone('SELECT * FROM comics WHERE ComicID=?',
+                                       [record['ComicID']]).fetchone()
+            comic = dict(comic_row) if comic_row is not None else None
+
+        source = orphanlib.issue_source(issueid, issue_number or record.get('ParsedIssue'))
+
+        if comic is not None:
+            issues = [dict(i) for i in
+                      myDB.select('SELECT * FROM issues WHERE ComicID=?',
+                                  [record['ComicID']])]
+            if issueid:
+                issue = next((i for i in issues if i.get('IssueID') == issueid), None)
+            else:
+                issue = orphanlib.match_issue(
+                    issues, issue_number or record.get('ParsedIssue'))
+
+        return (record, comic, issue, source,
+                orphanlib.filing_blockers(record, comic, issue))
+
+    def _orphan_filed_name(self, record, comic, issue, keep_name=False):
+        """What the file should be called once filed.
+
+        Renames whenever FILE_FORMAT is set, deliberately ignoring IMP_RENAME.
+        That setting governs bulk imports of files that are already named
+        sensibly; these are here precisely because their names are not, and
+        filing "DCP_batch_07.cbz" into a series folder under that name just
+        moves the problem. Every filing is previewed, and the dialog offers to
+        keep the original name.
+        """
+        original = record['FileName']
+        if keep_name or not mylar.CONFIG.FILE_FORMAT:
+            return original, False
+
+        try:
+            renamed = helpers.rename_param(comic['ComicID'], comic['ComicName'],
+                                           issue['Issue_Number'], original,
+                                           issueid=issue['IssueID'])
+            proposed = renamed['nfilename']
+        except Exception as e:
+            logger.warn('[ORPHANS] Could not work out a new filename: %s' % e)
+            return original, False
+
+        return proposed, proposed != original
+
+    def orphanFilePreview(self, OrphanID=None, issue_number=None, **kwargs):
+        """What filing would do. Changes nothing."""
+        if not mylar.CONFIG.ENABLE_ORPHANS:
+            return json.dumps({'blockers': [{'code': 'disabled',
+                                             'message': 'Orphans is disabled'}]})
+
+        record, comic, issue, source, blockers = self._orphan_context(
+            OrphanID, issue_number, kwargs.get('issueid'))
+        if blockers:
+            return json.dumps({
+                'blockers': blockers,
+                'series': (comic or {}).get('ComicName'),
+                'comicid': (record or {}).get('ComicID'),
+            })
+
+        destination_name, renamed = self._orphan_filed_name(
+            record, comic, issue, keep_name=str(kwargs.get('keep_name', '0')) == '1')
+
+        possible = orphanlib.tagging_possible(mylar.CONFIG.CT_TAG_CR,
+                                              mylar.CONFIG.CT_TAG_CBL)
+
+        without_meta = orphanlib.choose_placement(record['FilePath'],
+                                                  comic['ComicLocation'])
+        with_meta = orphanlib.choose_placement(record['FilePath'],
+                                               comic['ComicLocation'],
+                                               write_metadata=True)
+
+        plan = orphanlib.build_plan(record, comic, issue, destination_name,
+                                    without_meta)
+
+        # Both variants are sent so the dialog can show the disk cost change the
+        # moment the metadata box is ticked, without another round trip.
+        size = record.get('FileSize')
+        # possible: is there a tag format to write at all
+        # default:  what ENABLE_META prefers, used to pre-tick the box
+        # Deciding per file is the point - the global setting is a default,
+        # not a veto, matching what manual_metatag already does.
+        plan['metadata_available'] = possible
+        plan['metadata_default'] = bool(mylar.CONFIG.ENABLE_META)
+        plan['size_bytes'] = size
+        plan['size_human'] = helpers.human_size(size) if size else None
+        plan['placement_with_metadata'] = with_meta
+        plan['duplicate_bytes'] = orphanlib.duplicate_bytes(without_meta, size)
+        plan['duplicate_bytes_with_metadata'] = orphanlib.duplicate_bytes(with_meta, size)
+        plan['issue_image'] = issue.get('ImageURL')
+        plan['issue_name'] = issue.get('IssueName')
+        plan['issue_source'] = source
+        plan['warnings'] = orphanlib.filing_warnings(record, issue, source)
+        plan['renamed'] = renamed
+        plan['original_name'] = record['FileName']
+        plan['source_dir'] = os.path.dirname(record['FilePath'])
+        plan['blockers'] = []
+        return json.dumps(plan)
+    orphanFilePreview.exposed = True
+
+    def orphanIssues(self, OrphanID=None, q=None, **kwargs):
+        """The identified series' issues, for picking the right one.
+
+        Searchable by name as well as number - "The Black Forest" is how
+        someone knows a story; the number is what Mylar knows it by.
+        """
+        if not mylar.CONFIG.ENABLE_ORPHANS:
+            return json.dumps({'issues': []})
+
+        myDB = db.DBConnection()
+        row = myDB.selectone('SELECT * FROM orphans WHERE OrphanID=?', [OrphanID]).fetchone()
+        if row is None or not dict(row).get('ComicID'):
+            return json.dumps({'issues': [],
+                               'error': 'Identify the series first'})
+
+        record = dict(row)
+        issues = [dict(i) for i in myDB.select(
+            'SELECT IssueID, Issue_Number, IssueName, IssueDate, Status,'
+            ' Int_IssueNumber, ImageURL FROM issues WHERE ComicID=?'
+            ' ORDER BY Int_IssueNumber', [record['ComicID']])]
+
+        matched = orphanlib.search_issues(issues, q)
+        suggested = orphanlib.match_issue(issues, record.get('ParsedIssue'))
+
+        return json.dumps({
+            'issues': [{
+                'issueid': i.get('IssueID'),
+                'number': i.get('Issue_Number'),
+                'name': i.get('IssueName'),
+                'date': i.get('IssueDate'),
+                'status': i.get('Status'),
+                'image': i.get('ImageURL'),
+            } for i in matched[:500]],
+            'total': len(issues),
+            # what the filename implies, marked as a guess rather than preselected
+            'filename_guess': (suggested or {}).get('IssueID'),
+        })
+    orphanIssues.exposed = True
+
+    def orphanCover(self, OrphanID=None, **kwargs):
+        """The file's own cover, so it can be compared against a candidate.
+
+        Extracts just the cover rather than unpacking the archive, and caches
+        the result - these files run to a hundred megabytes.
+        """
+        if not mylar.CONFIG.ENABLE_ORPHANS:
+            return json.dumps({'image': None})
+
+        myDB = db.DBConnection()
+        row = myDB.selectone('SELECT * FROM orphans WHERE OrphanID=?', [OrphanID]).fetchone()
+        if row is None:
+            return json.dumps({'image': None})
+
+        record = dict(row)
+        cover_dir = os.path.join(mylar.CONFIG.CACHE_DIR, 'orphan_covers')
+        cover_path = os.path.join(cover_dir, '%s.jpg' % OrphanID)
+        cover_url = '%s/cache/orphan_covers/%s.jpg' % (
+            mylar.CONFIG.HTTP_ROOT.rstrip('/'), OrphanID)
+
+        if os.path.isfile(cover_path):
+            return json.dumps({'image': cover_url})
+
+        try:
+            if not os.path.isdir(cover_dir):
+                os.makedirs(cover_dir)
+            from mylar import getimage
+            result = getimage.extract_image(record['FilePath'], single=True)
+            raw = (result or {}).get('rawImage')
+            if not raw:
+                return json.dumps({'image': None,
+                                   'error': 'No cover could be read from this file'})
+            with open(cover_path, 'wb') as handle:
+                handle.write(raw)
+        except Exception as e:
+            logger.warn('[ORPHANS] Could not extract a cover from %s: %s'
+                        % (record.get('FileName'), e))
+            return json.dumps({'image': None, 'error': 'Could not read a cover'})
+
+        return json.dumps({'image': cover_url})
+    orphanCover.exposed = True
+
+    def orphanFileConfirm(self, OrphanID=None, issue_number=None,
+                          write_metadata='0', keep_name='0', issueid=None,
+                          **kwargs):
+        """Place the file, then let Mylar rescan the series to pick it up."""
+        if not mylar.CONFIG.ENABLE_ORPHANS:
+            return json.dumps({'status': 'failure', 'message': 'Orphans is disabled'})
+
+        record, comic, issue, source, blockers = self._orphan_context(
+            OrphanID, issue_number, issueid)
+        if blockers:
+            return json.dumps({'status': 'failure', 'blockers': blockers,
+                               'message': blockers[0]['message']})
+
+        destination_name, _renamed = self._orphan_filed_name(
+            record, comic, issue, keep_name=str(keep_name) == '1')
+
+        write_metadata = orphanlib.should_write_metadata(
+            write_metadata,
+            orphanlib.tagging_possible(mylar.CONFIG.CT_TAG_CR,
+                                       mylar.CONFIG.CT_TAG_CBL))
+
+        destination = os.path.join(comic['ComicLocation'], destination_name)
+        # metadata forces a copy - see choose_placement
+        method = orphanlib.choose_placement(record['FilePath'],
+                                            comic['ComicLocation'],
+                                            write_metadata=write_metadata)
+
+        try:
+            used = orphanlib.place_file(record['FilePath'], destination, method)
+        except orphanlib.FilingRefused as e:
+            return json.dumps({'status': 'failure', 'message': str(e)})
+        except Exception as e:
+            logger.error('[ORPHANS] Filing failed: %s' % e)
+            return json.dumps({'status': 'failure',
+                               'message': 'Could not place the file - see the log.'})
+
+        logger.info('[ORPHANS] %s %s -> %s' % (used, record['FilePath'], destination))
+
+        tagged = False
+        tag_error = None
+        if write_metadata:
+            try:
+                # tags the placed file, never the original
+                from mylar import cmtagmylar
+                cmtagmylar.run(comic['ComicLocation'], issueid=issue['IssueID'],
+                               filename=destination, manual=True,
+                               module='[ORPHANS]')
+                tagged = True
+            except Exception as e:
+                logger.warn('[ORPHANS] Metadata write failed: %s' % e)
+                tag_error = str(e)
+
+        myDB = db.DBConnection()
+        myDB.upsert('orphans',
+                    {'Status': 'filed', 'IssueID': issue['IssueID']},
+                    {'OrphanID': OrphanID})
+
+        # Show up in History like anything else that ended up in the library.
+        # Failing to record history must not undo a completed file operation,
+        # so this is best-effort.
+        try:
+            entry = orphanlib.history_row(record, comic, issue, destination,
+                                          helpers.now())
+            myDB.upsert('snatched', entry, {'IssueID': issue['IssueID'],
+                                            'DateAdded': entry['DateAdded']})
+        except Exception as e:
+            logger.warn('[ORPHANS] Could not record history: %s' % e)
+
+        # Let Mylar work out the issue's status and location from what is now on
+        # disk, rather than writing those rows by hand - this is what import does.
+        try:
+            updater.forceRescan(comic['ComicID'])
+        except Exception as e:
+            logger.warn('[ORPHANS] Rescan after filing failed: %s' % e)
+
+        message = '%s as %s' % ('Hardlinked' if used == 'hardlink' else 'Copied',
+                                destination_name)
+        if write_metadata and not tagged:
+            # the copy was made *because* metadata was asked for, so silently
+            # skipping the tagging would mean paying the disk cost for nothing
+            message += ' - but writing metadata failed, so it was filed untagged.'
+            message += ' See the log for why.'
+
+        return json.dumps({
+            'status': 'success',
+            'placement': used,
+            'destination': destination,
+            'tagged': tagged,
+            'tag_error': tag_error,
+            'message': message,
+        })
+    orphanFileConfirm.exposed = True
+
+    def orphanAddSeries(self, OrphanID=None, ComicID=None, **kwargs):
+        """Add the identified series to the watchlist so the file can be filed."""
+        if not mylar.CONFIG.ENABLE_ORPHANS:
+            return json.dumps({'status': 'failure'})
+
+        myDB = db.DBConnection()
+        row = myDB.selectone('SELECT * FROM orphans WHERE OrphanID=?', [OrphanID]).fetchone()
+        if row is None:
+            return json.dumps({'status': 'failure', 'message': 'Unknown orphan'})
+
+        comicid = ComicID or dict(row).get('ComicID')
+        if not comicid:
+            return json.dumps({'status': 'failure',
+                               'message': 'Identify the series first'})
+
+        try:
+            # the same call the Add Series flow uses; pulls the issue list and
+            # creates the series folder
+            threading.Thread(target=self.addbyid, args=(comicid,),
+                             kwargs={'calledby': True}, name='ORPHAN-ADD').start()
+        except Exception as e:
+            logger.error('[ORPHANS] Could not add series %s: %s' % (comicid, e))
+            return json.dumps({'status': 'failure',
+                               'message': 'Could not add the series - see the log.'})
+
+        return json.dumps({'status': 'success',
+                           'message': 'Adding the series - this can take a moment.'
+                                      ' Try filing again once it appears.'})
+    orphanAddSeries.exposed = True
+
+    def read_orphan(self, OrphanID=None, page_num=0, size=None):
+        """Page through an orphan in the existing web reader.
+
+        Reuses ComicScanner as-is: user_unpack_comic() already takes an
+        arbitrary id and path, so an orphan needs no changes to the reader.
+        """
+        if not mylar.CONFIG.ENABLE_ORPHANS:
+            raise cherrypy.HTTPRedirect("home")
+
+        myDB = db.DBConnection()
+        row = myDB.selectone('SELECT * FROM orphans WHERE OrphanID=?', [OrphanID]).fetchone()
+        if row is None:
+            raise cherrypy.HTTPRedirect("orphans")
+
+        from mylar.webviewer import ComicScanner
+        cache_id = 'orphan_%s' % OrphanID
+        scanner = ComicScanner()
+        images = scanner.reading_images(cache_id)
+        if not images:
+            scanner.user_unpack_comic(cache_id, row['FilePath'])
+            images = scanner.reading_images(cache_id)
+
+        page_num = int(page_num)
+        if page_num >= len(images):
+            page_num = 0
+
+        return serve_template(templatename="orphan_read.html",
+                              title=row['FileName'], orphan=dict(row),
+                              images=images, page_num=page_num)
+    read_orphan.exposed = True
 
     def loadSearchResults(self, query=None, iDisplayStart=0, iDisplayLength=25, iSortCol_0='1', sSortDir_0="desc", sSearch="", hide_already='0', hide_tpb='0', **kwargs):
 
@@ -7267,6 +7805,8 @@ class WebInterface(object):
                     "enable_nav_menu": helpers.checked(mylar.CONFIG.ENABLE_NAV_MENU),
                     "enable_issue_events": helpers.checked(mylar.CONFIG.ENABLE_ISSUE_EVENTS),
                     "issue_events_retention_days": mylar.CONFIG.ISSUE_EVENTS_RETENTION_DAYS,
+                    "enable_orphans": helpers.checked(mylar.CONFIG.ENABLE_ORPHANS),
+                    "orphan_scan_dir": mylar.CONFIG.ORPHAN_SCAN_DIR if mylar.CONFIG.ORPHAN_SCAN_DIR else "",
                }
         return serve_template(templatename="config.html", title="Settings", config=config, comicinfo=comicinfo)
     config.exposed = True
@@ -7599,7 +8139,7 @@ class WebInterface(object):
                            'boxcar_onsnatch', 'pushbullet_enabled', 'pushbullet_onsnatch', 'telegram_enabled', 'telegram_onsnatch', 'telegram_image', 'discord_enabled', 'discord_onsnatch', 'slack_enabled', 'slack_onsnatch',
                            'email_enabled', 'email_enc', 'email_ongrab', 'email_onpost', 'gotify_enabled', 'gotify_server_url', 'gotify_token', 'gotify_onsnatch', 'opds_enable', 'opds_authentication', 'opds_metainfo', 'opds_pagesize', 'enable_ddl',
                            'enable_getcomics', 'enable_airdcpp', 'jd2_enable', 'enable_external_server', 'ddl_prefer_upscaled', 'deluge_pause',
-                           'enable_nav_menu', 'enable_issue_events'] #enable_public
+                           'enable_nav_menu', 'enable_issue_events', 'enable_orphans'] #enable_public
 
         for checked_config in checked_configs:
             if checked_config not in kwargs:
