@@ -1029,3 +1029,14 @@ def test_history_row_survives_a_missing_size():
     row = orphans.history_row({'FilePath': '/x.cbz', 'FileSize': None}, comic_row(),
                               issue_row(), '/comics/Fables/x.cbz', 'now')
     assert row['Size'] is None
+
+
+# --- adding a series ------------------------------------------------------
+# Filing organises what is already on disk. With AUTOWANT_ALL on, an ordinary
+# add marks every missing issue Wanted and the next search downloads them all.
+
+@pytest.mark.unit
+def test_series_added_for_an_orphan_does_not_want_every_issue():
+    args, kwargs = orphans.series_add_request('4050-25543')
+    assert args == ('4050-25543',)
+    assert kwargs['suppress_addall'] is True

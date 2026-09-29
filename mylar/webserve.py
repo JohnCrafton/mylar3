@@ -1676,9 +1676,10 @@ class WebInterface(object):
 
         try:
             # the same call the Add Series flow uses; pulls the issue list and
-            # creates the series folder
-            threading.Thread(target=self.addbyid, args=(comicid,),
-                             kwargs={'calledby': True}, name='ORPHAN-ADD').start()
+            # creates the series folder, without wanting every missing issue
+            args, kwargs = orphanlib.series_add_request(comicid)
+            threading.Thread(target=self.addbyid, args=args, kwargs=kwargs,
+                             name='ORPHAN-ADD').start()
         except Exception as e:
             logger.error('[ORPHANS] Could not add series %s: %s' % (comicid, e))
             return json.dumps({'status': 'failure',
