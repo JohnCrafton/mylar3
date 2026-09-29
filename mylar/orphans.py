@@ -555,6 +555,20 @@ def tracked_file_paths(rows):
                      for folder, name in rows if folder and name)
 
 
+def insert_rows(records):
+    """One INSERT for a whole scan, as (sql, rows) for executemany, or None.
+
+    OR IGNORE: a file already recorded keeps its row, and whatever was decided
+    about it, rather than being reset to a fresh scan.
+    """
+    if not records:
+        return None
+    columns = sorted(set().union(*records))
+    sql = 'INSERT OR IGNORE INTO orphans (%s) VALUES (%s)' % (
+        ', '.join(columns), ', '.join(['?'] * len(columns)))
+    return sql, [tuple(r.get(c) for c in columns) for r in records]
+
+
 Survey = collections.namedtuple(
     'Survey', 'found walked skipped_tracked skipped_known missing_tracked')
 
