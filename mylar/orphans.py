@@ -873,6 +873,16 @@ def should_write_metadata(requested, tagging_possible):
     return str(requested) in ('1', 'true', 'True')
 
 
+def series_add_request(comicid):
+    """Arguments for WebInterface.addbyid when filing needs a new series.
+
+    suppress_addall: filing organises files already on disk. Under
+    AUTOWANT_ALL an ordinary add marks every missing issue Wanted, and across
+    a library of orphans that queues the whole back catalogue for download.
+    """
+    return (comicid,), {'calledby': True, 'suppress_addall': True}
+
+
 def history_row(record, comic, issue, destination, when):
     """A history entry for a file filed out of the orphans directory.
 
