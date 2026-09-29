@@ -35,13 +35,12 @@ jobs:
               ref: 'nightly'
 
           - name: Edit Dockerfile for current repo/branch
+            # No debugpy: this image runs in production, and an unauthenticated
+            # debugger on 0.0.0.0 is remote code execution for anything that can
+            # reach the container network.
             run: |
-              sed -i "/ARG MYLAR3_RELEASE/aENV PYDEVD_DISABLE_FILE_VALIDATION=1" Dockerfile
               sed -i "s@MylarComics/mylar3@${{github.repository}}@g" Dockerfile
               sed -i "s@commits/nightly@commits/${{github.ref_name}}@g" Dockerfile
-              sed -i "/requirements.txt/a\ \ pip install --no-cache-dir --find-links https://wheel-index.linuxserver.io/alpine-3.23/ debugpy && \\\\" Dockerfile
-              sed -i "/EXPOSE 8090/aEXPOSE 5678" Dockerfile
-              sed -i "s@python3 /app/mylar3/Mylar.py@python3 -m debugpy --listen 0.0.0.0:5678 /app/mylar3/Mylar.py@g" ./root/etc/s6-overlay/s6-rc.d/svc-mylar3/run
 
           - name: Log in to the Container registry
             uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef # v3.6.0
