@@ -26,6 +26,7 @@ corroborated match. auto_selection() is deliberately hard to satisfy because
 it drives moving files on disk.
 """
 
+import collections
 import difflib
 import math
 import re
@@ -388,6 +389,15 @@ def _debug(message):
         pass
 
 
+def _warn(message):
+    """As _debug, at warning level - for things that cost the user disk."""
+    try:
+        from mylar import logger
+        logger.warn(message)
+    except Exception:
+        pass
+
+
 def probe_archive(path):
     """Read page count and any embedded ComicInfo.xml out of a comic archive.
 
@@ -536,21 +546,39 @@ def to_parsed(record):
     }
 
 
-def scan_directory(root, known_paths=None):
-    """Walk a directory and describe every comic file found.
+def tracked_file_paths(rows):
+    """Full paths of the files Mylar already holds, from (ComicLocation,
+    Location) pairs. Rows without both halves have no file to skip."""
+    import os
 
-    Read-only. known_paths lets a rescan skip files already recorded, which
-    matters because probing means decompressing.
+    return frozenset(os.path.join(folder, name)
+                     for folder, name in rows if folder and name)
+
+
+Survey = collections.namedtuple(
+    'Survey', 'found walked skipped_tracked skipped_known missing_tracked')
+
+
+def survey(root, known_paths=None, tracked_paths=None):
+    """Walk a directory and describe every comic file that is an orphan.
+
+    Read-only. Files already recorded as orphans (known_paths) or already
+    belonging to a series (tracked_paths) are skipped before probing, which
+    matters because probing means decompressing. Tracked files under root
+    that the walk never saw are reported as missing.
     """
     import os
 
-    known = set(known_paths or [])
-    found = []
+    known = frozenset(known_paths or [])
+    tracked = frozenset(tracked_paths or [])
 
     if not root or not os.path.isdir(root):
         _debug('[ORPHANS] Not a directory: %s' % root)
-        return found
+        return Survey([], 0, 0, 0, ())
 
+    found = []
+    seen = set()
+    skipped_tracked = skipped_known = 0
     for dirpath, _dirnames, filenames in os.walk(root):
         for filename in sorted(filenames):
             if not filename.lower().endswith(COMIC_EXTENSIONS):
@@ -559,12 +587,24 @@ def scan_directory(root, known_paths=None):
                 continue
 
             path = os.path.join(dirpath, filename)
-            if path in known:
-                continue
+            seen.add(path)
+            if path in tracked:
+                skipped_tracked += 1
+            elif path in known:
+                skipped_known += 1
+            else:
+                found.append(describe(path, parse_result=parse_filename(path),
+                                      probe=probe_archive(path)))
 
-            found.append(describe(path, parse_result=parse_filename(path),
-                                  probe=probe_archive(path)))
-    return found
+    prefix = os.path.join(root, '')
+    missing = tuple(sorted(p for p in tracked
+                           if p.startswith(prefix) and p not in seen))
+    return Survey(found, len(seen), skipped_tracked, skipped_known, missing)
+
+
+def scan_directory(root, known_paths=None):
+    """The orphans found under root; see survey() for the counts."""
+    return survey(root, known_paths=known_paths).found
 
 
 def parse_filename(path):
@@ -618,7 +658,10 @@ class FilingRefused(Exception):
 
 
 def choose_placement(source, destination_dir, write_metadata=False):
-    """'hardlink' when the two live on one filesystem, otherwise 'copy'.
+    """'hardlink' when the two share a mount, otherwise 'copy'.
+
+    One device is not enough: link(2) refuses to cross mount points, and in
+    Docker two bind mounts from the same disk report the same st_dev.
 
     Writing metadata forces a copy: a hardlink is a second name for one set of
     bytes, so tagging through it would rewrite the original as well.
@@ -626,12 +669,24 @@ def choose_placement(source, destination_dir, write_metadata=False):
     if write_metadata:
         return 'copy'
     try:
-        return ('hardlink'
-                if os.stat(source).st_dev == os.stat(destination_dir).st_dev
-                else 'copy')
+        same_device = os.stat(source).st_dev == os.stat(destination_dir).st_dev
     except OSError:
         # cannot tell (missing path, permissions) - copy is always allowed
         return 'copy'
+    if same_device and _mount_root(source) == _mount_root(destination_dir):
+        return 'hardlink'
+    return 'copy'
+
+
+def _mount_root(path):
+    """The mount point path lives under."""
+    path = os.path.abspath(path)
+    while not os.path.ismount(path):
+        parent = os.path.dirname(path)
+        if parent == path:
+            break
+        path = parent
+    return path
 
 
 def duplicate_bytes(placement, size):
@@ -660,7 +715,7 @@ def place_file(source, destination, method):
             return 'hardlink'
         except OSError as e:
             # some filesystems refuse links even within one device
-            _debug('[ORPHANS] Hardlink failed (%s), copying instead' % e)
+            _warn('[ORPHANS] Hardlink failed (%s), copying %s instead' % (e, source))
 
     shutil.copy2(source, destination)
     return 'copy'
