@@ -1040,3 +1040,41 @@ def test_series_added_for_an_orphan_does_not_want_every_issue():
     args, kwargs = orphans.series_add_request('4050-25543')
     assert args == ('4050-25543',)
     assert kwargs['suppress_addall'] is True
+
+
+# --- recording a scan -------------------------------------------------------
+# Row-at-a-time upserts commit twice per file under Mylar's global db lock; a
+# 5,000-file library took minutes of fsyncs and stalled every other thread.
+
+@pytest.mark.unit
+def test_insert_rows_builds_one_statement_for_every_record():
+    sql, rows = orphans.insert_rows([
+        {'FilePath': '/a.cbz', 'FileName': 'a.cbz'},
+        {'FilePath': '/b.cbz', 'PageCount': 7},
+    ])
+    assert sql == ('INSERT OR IGNORE INTO orphans (FileName, FilePath, PageCount)'
+                   ' VALUES (?, ?, ?)')
+    assert rows == [('a.cbz', '/a.cbz', None), (None, '/b.cbz', 7)]
+
+
+@pytest.mark.unit
+def test_insert_rows_of_nothing_is_nothing():
+    assert orphans.insert_rows([]) is None
+
+
+@pytest.mark.integration
+def test_insert_rows_keeps_an_existing_row_for_the_same_file():
+    import sqlite3
+    db = sqlite3.connect(':memory:')
+    db.execute('CREATE TABLE orphans (FilePath TEXT UNIQUE, FileName TEXT,'
+               ' Status TEXT)')
+    db.execute("INSERT INTO orphans VALUES ('/a.cbz', 'a.cbz', 'identified')")
+
+    sql, rows = orphans.insert_rows([
+        {'FilePath': '/a.cbz', 'FileName': 'a.cbz', 'Status': 'new'},
+        {'FilePath': '/b.cbz', 'FileName': 'b.cbz', 'Status': 'new'},
+    ])
+    db.executemany(sql, rows)
+
+    assert db.execute('SELECT FilePath, Status FROM orphans ORDER BY FilePath'
+                      ).fetchall() == [('/a.cbz', 'identified'), ('/b.cbz', 'new')]

@@ -1138,10 +1138,14 @@ class WebInterface(object):
             try:
                 report = orphanlib.survey(scan_dir, known_paths=known,
                                           tracked_paths=tracked)
-                for record in report.found:
-                    record['OrphanID'] = str(uuid.uuid4())[:8]
-                    record['ScanDate'] = helpers.now()
-                    myDB.upsert('orphans', record, {'FilePath': record['FilePath']})
+                now = helpers.now()
+                batch = orphanlib.insert_rows(
+                    [dict(record, OrphanID=str(uuid.uuid4())[:8], ScanDate=now)
+                     for record in report.found])
+                # one transaction: row-at-a-time commits held the global db
+                # lock for minutes on a large library
+                if batch:
+                    myDB.action(batch[0], batch[1], executemany=True)
                 logger.info('[ORPHANS] Scan complete - %s file(s) walked, %s new,'
                             ' %s already in a series, %s already recorded,'
                             ' %s tracked file(s) missing from disk'
