@@ -427,6 +427,61 @@ def test_scan_reads_page_counts_from_the_files_it_finds(tmp_path):
     assert found[0]['PageCount'] == 7
 
 
+# --- files Mylar already tracks -----------------------------------------
+# Pointed at a real library, most files belong to a series already. Probing
+# them means decompressing each one only to list what is not an orphan.
+
+@pytest.mark.unit
+def test_tracked_file_paths_joins_series_folder_and_file_name():
+    rows = [('/media/Saga (2012)', 'Saga 001 (2012).cbz'),
+            ('/media/Saga (2012)', 'Saga 002 (2012).cbz')]
+    assert orphans.tracked_file_paths(rows) == frozenset([
+        '/media/Saga (2012)/Saga 001 (2012).cbz',
+        '/media/Saga (2012)/Saga 002 (2012).cbz'])
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("row", [
+    (None, 'x.cbz'), ('', 'x.cbz'), ('/media/Saga', None), ('/media/Saga', ''),
+])
+def test_tracked_file_paths_ignores_rows_without_a_file(row):
+    assert orphans.tracked_file_paths([row]) == frozenset()
+
+
+@pytest.mark.integration
+def test_survey_skips_tracked_files_and_counts_why(tmp_path):
+    tracked = make_cbz(tmp_path / 'tracked.cbz', pages=2)
+    known = make_cbz(tmp_path / 'known.cbz', pages=2)
+    make_cbz(tmp_path / 'new.cbz', pages=2)
+
+    report = orphans.survey(str(tmp_path), known_paths=[known],
+                            tracked_paths=[tracked])
+
+    assert [r['FileName'] for r in report.found] == ['new.cbz']
+    assert report.walked == 3
+    assert report.skipped_tracked == 1
+    assert report.skipped_known == 1
+
+
+@pytest.mark.integration
+def test_survey_reports_tracked_files_missing_under_the_root(tmp_path):
+    make_cbz(tmp_path / 'here.cbz', pages=2)
+    gone = str(tmp_path / 'gone.cbz')
+    elsewhere = '/somewhere/else/entirely.cbz'
+
+    report = orphans.survey(str(tmp_path), tracked_paths=[
+        str(tmp_path / 'here.cbz'), gone, elsewhere])
+
+    # outside the scanned root is not ours to call missing
+    assert report.missing_tracked == (gone,)
+
+
+@pytest.mark.unit
+def test_survey_of_a_bad_root_is_empty():
+    report = orphans.survey(None)
+    assert report.found == [] and report.walked == 0
+
+
 # --- cleaning the search query ------------------------------------------
 # "Batman (1940) Volume 01 Issue 014.cbr" parses to the series
 # 'Batman (1940) Volume01 ', which ComicVine returns nothing for.
@@ -609,6 +664,41 @@ def test_placement_falls_back_to_copy_across_filesystems(tmp_path, monkeypatch):
 
     monkeypatch.setattr(orphans.os, 'stat', fake_stat)
     assert orphans.choose_placement(src, str(dst_dir)) == 'copy'
+
+
+@pytest.mark.integration
+def test_placement_copies_across_mounts_of_one_filesystem(tmp_path, monkeypatch):
+    """link(2) refuses to cross mount points even on a single device.
+
+    In Docker, two bind mounts from one disk report the same st_dev, and
+    linking between them still fails with EXDEV.
+    """
+    (tmp_path / 'orphans').mkdir()
+    (tmp_path / 'library' / 'series').mkdir(parents=True)
+    src = make_cbz(tmp_path / 'orphans' / 'src.cbz', pages=2)
+    mounts = {str(tmp_path / 'orphans'), str(tmp_path / 'library')}
+
+    real_ismount = orphans.os.path.ismount
+    monkeypatch.setattr(orphans.os.path, 'ismount',
+                        lambda p: p in mounts or real_ismount(p))
+
+    assert orphans.choose_placement(
+        src, str(tmp_path / 'library' / 'series')) == 'copy'
+
+
+@pytest.mark.integration
+def test_placement_hardlinks_within_one_mount(tmp_path, monkeypatch):
+    (tmp_path / 'library' / 'loose').mkdir(parents=True)
+    (tmp_path / 'library' / 'series').mkdir()
+    src = make_cbz(tmp_path / 'library' / 'loose' / 'src.cbz', pages=2)
+    mounts = {str(tmp_path / 'library')}
+
+    real_ismount = orphans.os.path.ismount
+    monkeypatch.setattr(orphans.os.path, 'ismount',
+                        lambda p: p in mounts or real_ismount(p))
+
+    assert orphans.choose_placement(
+        src, str(tmp_path / 'library' / 'series')) == 'hardlink'
 
 
 @pytest.mark.integration

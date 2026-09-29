@@ -1220,15 +1220,31 @@ class WebInterface(object):
         def scan():
             myDB = db.DBConnection()
             known = [r['FilePath'] for r in myDB.select('SELECT FilePath FROM orphans')]
+            # files already filed to a series are not orphans, and a scan of
+            # the whole library would otherwise decompress every one of them
+            tracked = orphanlib.tracked_file_paths(
+                (r['ComicLocation'], r['Location']) for r in myDB.select(
+                    'SELECT c.ComicLocation, i.Location FROM issues i'
+                    ' JOIN comics c ON c.ComicID = i.ComicID'
+                    ' UNION ALL'
+                    ' SELECT c.ComicLocation, a.Location FROM annuals a'
+                    ' JOIN comics c ON c.ComicID = a.ComicID'))
             mylar.ORPHAN_SCAN_RUNNING = True
             try:
-                found = orphanlib.scan_directory(scan_dir, known_paths=known)
-                for record in found:
+                report = orphanlib.survey(scan_dir, known_paths=known,
+                                          tracked_paths=tracked)
+                for record in report.found:
                     record['OrphanID'] = str(uuid.uuid4())[:8]
                     record['ScanDate'] = helpers.now()
                     myDB.upsert('orphans', record, {'FilePath': record['FilePath']})
-                logger.info('[ORPHANS] Scan complete - %s new file(s) recorded'
-                            % len(found))
+                logger.info('[ORPHANS] Scan complete - %s file(s) walked, %s new,'
+                            ' %s already in a series, %s already recorded,'
+                            ' %s tracked file(s) missing from disk'
+                            % (report.walked, len(report.found),
+                               report.skipped_tracked, report.skipped_known,
+                               len(report.missing_tracked)))
+                for path in report.missing_tracked:
+                    logger.fdebug('[ORPHANS] Tracked but missing: %s' % path)
             except Exception as e:
                 logger.error('[ORPHANS] Scan failed: %s' % e)
             finally:
