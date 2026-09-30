@@ -1,3 +1,6 @@
+import collections
+import os
+import shutil
 import sqlite3
 
 import pytest
@@ -238,6 +241,19 @@ def test_plan_series_ignores_a_recorded_file_that_is_not_on_disk():
     assert [(m.kind, m.orphanid) for m in plan.moves] == [('move', 'F 001.cbz')]
 
 
+
+@pytest.mark.unit
+def test_plan_series_never_parks_or_moves_the_file_mylar_tracks():
+    # the scan can list a file Mylar already has as an orphan; parking it
+    # would take the issue's own file away
+    tracked = orphan('/l/F (2002)/F 001 (2002).cbz', ParsedIssue='001', FileSize=50)
+    copy = orphan('/l/F/F 001.cbz', ParsedIssue='001', FileSize=10)
+    plan = ob.plan_series([tracked, copy], _issues(1, n1='F 001 (2002).cbz'),
+                          lambda issue: True, '/l/F (2002)', _name_for, '/l')
+    assert [(m.kind, m.orphanid) for m in plan.moves] == [('park', 'F 001.cbz')]
+    assert plan.skipped == ('F 001 (2002).cbz',)
+
+
 # --- guards -----------------------------------------------------------------
 
 @pytest.mark.unit
@@ -266,3 +282,55 @@ def test_backup_database_writes_a_consistent_copy_beside_the_original(tmp_path):
 
     assert path == str(tmp_path / 'mylar.db.orphans-20260930-120000')
     assert sqlite3.connect(path).execute('SELECT x FROM t').fetchall() == [(1,)]
+
+
+def _small_db(tmp_path):
+    src = str(tmp_path / 'mylar.db')
+    conn = sqlite3.connect(src)
+    conn.execute('CREATE TABLE t (x)')
+    conn.execute('INSERT INTO t VALUES (1)')
+    conn.commit()
+    conn.close()
+    return src
+
+
+@pytest.mark.integration
+def test_backup_database_refuses_without_room_for_two_copies(tmp_path, monkeypatch):
+    src = _small_db(tmp_path)
+    usage = collections.namedtuple('usage', 'total used free')
+    monkeypatch.setattr(shutil, 'disk_usage',
+                        lambda p: usage(10 ** 9, 10 ** 9, 2 * os.path.getsize(src) - 1))
+
+    with pytest.raises(RuntimeError, match='free'):
+        ob.backup_database(src, '20260930-120000')
+
+    assert os.listdir(str(tmp_path)) == ['mylar.db']
+
+
+@pytest.mark.integration
+def test_backup_database_removes_a_partial_copy_when_the_backup_fails(tmp_path, monkeypatch):
+    src = _small_db(tmp_path)
+    real_connect = sqlite3.connect
+
+    class _DiesMidway(object):
+        def __init__(self, conn):
+            self.conn = conn
+
+        def backup(self, target):
+            target.execute('CREATE TABLE half (x)')
+            target.commit()
+            raise sqlite3.OperationalError('disk I/O error')
+
+        def close(self):
+            self.conn.close()
+
+    def connect(path, *a, **k):
+        conn = real_connect(path, *a, **k)
+        return _DiesMidway(conn) if path == src else conn
+
+    monkeypatch.setattr(ob.sqlite3, 'connect', connect)
+
+    with pytest.raises(sqlite3.OperationalError):
+        ob.backup_database(src, '20260930-120000')
+
+    assert os.listdir(str(tmp_path)) == ['mylar.db']

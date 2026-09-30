@@ -28,6 +28,7 @@ import collections
 import hashlib
 import os
 import re
+import shutil
 import sqlite3
 
 from mylar import orphans
@@ -215,6 +216,13 @@ def park_destination(source, library_root):
     return os.path.join(library_root, DUPLICATES_DIR, relative)
 
 
+def tracked_path(issue, series_dir):
+    """The file Mylar records for an issue, normalised; None if it has none."""
+    if not issue.get('Location'):
+        return None
+    return os.path.normpath(os.path.join(series_dir, issue['Location']))
+
+
 def plan_series(files, issues, has_file, destination_dir, name_for, library_root):
     """Every move filing these files into one series would make.
 
@@ -224,13 +232,15 @@ def plan_series(files, issues, has_file, destination_dir, name_for, library_root
     name_for: (orphan, issue) -> the filed file name
 
     A file whose number matches no issue is skipped - left an orphan - rather
-    than guessed at.
+    than guessed at. So is a file that is the one Mylar records for its issue:
+    it is already filed, and parking it would take the issue's file away.
     """
     by_issue = collections.OrderedDict()
     skipped = []
     for row in files:
         issue = orphans.match_issue(issues, row.get('ParsedIssue'))
-        if issue is None:
+        if issue is None or os.path.normpath(row['FilePath']) == tracked_path(
+                issue, destination_dir):
             skipped.append(row['OrphanID'])
             continue
         by_issue.setdefault(issue['IssueID'], (issue, []))[1].append(row)
@@ -275,15 +285,28 @@ def backup_database(path, stamp):
     """Copy the database beside itself before a run moves anything.
 
     sqlite's backup API, not a file copy: Mylar may be writing while it runs.
+    Refuses unless there is room for two copies, and removes a half-written
+    copy rather than leave it beside the real database.
     """
     target = '%s.orphans-%s' % (path, stamp)
-    source = sqlite3.connect(path)
+    size = os.path.getsize(path)
+    free = shutil.disk_usage(os.path.dirname(os.path.abspath(path))).free
+    if free < 2 * size:
+        raise RuntimeError('Not enough free space to back up the database: %d bytes'
+                           ' free beside %s, %d needed.' % (free, path, 2 * size))
+    existed = os.path.exists(target)
     try:
-        copy = sqlite3.connect(target)
+        source = sqlite3.connect(path)
         try:
-            source.backup(copy)
+            copy = sqlite3.connect(target)
+            try:
+                source.backup(copy)
+            finally:
+                copy.close()
         finally:
-            copy.close()
-    finally:
-        source.close()
+            source.close()
+    except Exception:
+        if not existed and os.path.exists(target):
+            os.remove(target)
+        raise
     return target
