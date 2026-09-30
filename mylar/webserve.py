@@ -1631,10 +1631,17 @@ class WebInterface(object):
     orphanGroups.exposed = True
 
     def orphanGroupsStatus(self, **kwargs):
+        if not mylar.CONFIG.ENABLE_ORPHANS:
+            # the shape the page polls for, so it shows the message and carries on
+            return json.dumps({'status': 'failure', 'running': False, 'kind': None,
+                               'progress': {}, 'message': 'Orphans is disabled',
+                               'stopping': False})
         return json.dumps(orphan_jobs.STATE.snapshot())
     orphanGroupsStatus.exposed = True
 
     def orphanGroupsStop(self, **kwargs):
+        if not mylar.CONFIG.ENABLE_ORPHANS:
+            return json.dumps({'status': 'failure', 'message': 'Orphans is disabled'})
         orphan_jobs.STATE.request_stop()
         return json.dumps({'status': 'success',
                            'message': 'Stopping after the current item.'})
