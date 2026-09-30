@@ -166,11 +166,9 @@
                 } else {
                         $('.og-action, .og-modal-action').prop('disabled', false).removeClass('disabled');
                         $('#btn_stop').prop('disabled', true).addClass('disabled');
-                        if (job.message){
-                                html = esc(job.message);
-                        } else {
-                                html = esc(stickyMessage);
-                        }
+                        // a message from the user's last action wins over the
+                        // previous job's, which the server keeps until the next one
+                        html = esc(stickyMessage || job.message || '');
                 }
                 $('#orphan_job').html(html);
         }
