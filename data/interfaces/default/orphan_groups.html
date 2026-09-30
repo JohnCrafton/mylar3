@@ -135,6 +135,8 @@
 </%def>
 
 <%def name="javascriptIncludes()">
+        <%doc>not used by this page, but base.html's plugins.js extends it on load</%doc>
+        <script src="js/libs/jquery.dataTables.min.js"></script>
         <script>
         function esc(text){
                 return $('<div/>').text(text === null || text === undefined ? '' : text).html();
