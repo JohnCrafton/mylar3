@@ -220,7 +220,20 @@ def load_batches(db):
             'done': 0, 'failed': 0, 'planned': 0, 'reverted': 0, 'moving': 0, 'cancelled': 0, 'When': row['WhenDone']})
         entry[row['Status']] = row['n']
         entry['When'] = max(entry['When'] or '', row['WhenDone'] or '')
+    for entry in batches_.values():
+        entry['resumable'] = resumable(db, entry['BatchID'])
     return sorted(batches_.values(), key=lambda b: b['When'] or '', reverse=True)
+
+
+def resumable(db, batch_id):
+    """Whether a batch has moves still to make or filed files still to record."""
+    counts = moves.batch_counts(db, batch_id)
+    if counts.get('planned') or counts.get('failed') or counts.get('moving'):
+        return True
+    return db.select(
+        "SELECT COUNT(*) AS n FROM orphan_moves m JOIN orphans o ON o.OrphanID = m.OrphanID"
+        " WHERE m.BatchID=? AND m.Status='done' AND m.Kind='move' AND o.Status != 'filed'",
+        [batch_id])[0]['n'] > 0
 
 
 FileDeps = collections.namedtuple(
@@ -337,8 +350,21 @@ def file_series(db, comicid, deps, run_id):
         " AND o.Status IN ('new', 'identified')", [comicid])]
     location = comic['ComicLocation']
 
+    # a scan can list the very file Mylar records for an issue; that file is
+    # already filed, and must not be parked or moved as a duplicate of itself
+    tracked = dict((batches.tracked_path(i, location), i['IssueID'])
+                   for i in comic['issues'] if i.get('Location'))
+    already = [(tracked[os.path.realpath(f['FilePath'])], f['OrphanID']) for f in files
+               if os.path.realpath(f['FilePath']) in tracked]
+    if already:
+        db.action("UPDATE orphans SET Status='filed', IssueID=? WHERE OrphanID=?",
+                  already, executemany=True)
+        deps.log('[ORPHANS] Series %s: %d orphans are the files Mylar already has;'
+                 ' marked filed' % (comicid, len(already)))
+        files = [f for f in files if os.path.realpath(f['FilePath']) not in tracked]
+
     def has_file(issue):
-        # a recorded Location is not proof - 258 of one library's were stale
+        # a recorded Location is not proof: it can outlive the file it names
         return bool(issue.get('Location')) and os.path.isfile(
             os.path.join(location, issue['Location']))
 
@@ -346,6 +372,7 @@ def file_series(db, comicid, deps, run_id):
                                lambda o, i: deps.name_for(comic, o, i),
                                deps.library_root)
     batch_id = uuid.uuid4().hex[:12]
+    skipped = len(plan.skipped) + len(already)
     moves.record_plan(db, run_id, batch_id, comicid,
                       dict((f['OrphanID'], f['GroupID']) for f in files),
                       plan.moves, deps.now())
@@ -353,9 +380,15 @@ def file_series(db, comicid, deps, run_id):
         db.action("UPDATE orphan_groups SET Status='filed' WHERE ComicID=?"
                   " AND Status='approved'", [comicid])
         deps.log('[ORPHANS] Series %s: nothing to move, %d skipped'
-                 % (comicid, len(plan.skipped)))
-        return BatchResult(batch_id, comicid, 0, 0, len(plan.skipped), 0, False, None)
-    return _finish(db, batch_id, comic, deps, len(plan.skipped), started)
+                 % (comicid, skipped))
+        return BatchResult(batch_id, comicid, 0, 0, skipped, 0, False, None)
+    # out of 'approved' before a file moves: if the process dies part way, the
+    # next File run must leave these to Resume rather than plan them again.
+    # _finish settles them as filed or partial.
+    db.action("UPDATE orphan_groups SET Status='partial' WHERE GroupID IN"
+              " (SELECT DISTINCT GroupID FROM orphan_moves WHERE BatchID=?"
+              " AND GroupID IS NOT NULL)", [batch_id])
+    return _finish(db, batch_id, comic, deps, skipped, started)
 
 
 def resume_batch(db, batch_id, deps):
@@ -363,12 +396,7 @@ def resume_batch(db, batch_id, deps):
     rows = db.select('SELECT ComicID FROM orphan_moves WHERE BatchID=? LIMIT 1', [batch_id])
     if not rows:
         return BatchResult(batch_id, None, 0, 0, 0, 0, False, 'Unknown batch')
-    counts = moves.batch_counts(db, batch_id)
-    unfiled = db.select(
-        "SELECT COUNT(*) AS n FROM orphan_moves m JOIN orphans o ON o.OrphanID = m.OrphanID"
-        " WHERE m.BatchID=? AND m.Status='done' AND m.Kind='move' AND o.Status != 'filed'",
-        [batch_id])[0]['n']
-    if not (counts.get('planned') or counts.get('failed') or counts.get('moving') or unfiled):
+    if not resumable(db, batch_id):
         return BatchResult(batch_id, rows[0]['ComicID'], 0, 0, 0, 0, False,
                            'Nothing left to file in this batch.')
     comic = deps.ensure_series(rows[0]['ComicID'])
@@ -407,21 +435,36 @@ def run_file_job(db, deps, run_id):
 
 
 def revert_batch(db, batch_id, deps):
-    """Undo a batch and put its orphans and groups back as they were."""
-    before = dict((r['Seq'], r['OrphanID']) for r in db.select(
-        "SELECT Seq, OrphanID FROM orphan_moves WHERE BatchID=? AND Status='done'"
-        " AND Kind IN ('move', 'park')", [batch_id]))
+    """Undo a batch and put its orphans, issues and groups back as they were."""
+    before = dict((r['Seq'], dict(r)) for r in db.select(
+        "SELECT Seq, OrphanID, IssueID, Kind FROM orphan_moves WHERE BatchID=?"
+        " AND Status IN ('done', 'moving') AND Kind IN ('move', 'park')", [batch_id]))
+    pending = sum(n for status, n in moves.batch_counts(db, batch_id).items()
+                  if status in ('planned', 'failed'))
     result = moves.revert(db, batch_id, deps.now)
     now_reverted = set(r['Seq'] for r in db.select(
         "SELECT Seq FROM orphan_moves WHERE BatchID=? AND Status='reverted'", [batch_id]))
-    back = [(before[s],) for s in before if s in now_reverted]
-    if back:
+    undone = [before[s] for s in before if s in now_reverted]
+    if undone:
         db.action("UPDATE orphans SET Status='identified', IssueID=NULL WHERE OrphanID=?",
-                  back, executemany=True)
-    group_status = 'partial' if result.skipped else 'reverted'
-    db.action("UPDATE orphan_groups SET Status=? WHERE GroupID IN"
-              " (SELECT DISTINCT GroupID FROM orphan_moves WHERE BatchID=?"
-              " AND GroupID IS NOT NULL)", [group_status, batch_id])
+                  [(r['OrphanID'],) for r in undone], executemany=True)
+    # the filed file is gone from the series folder, so what the batch told
+    # Mylar about those issues goes too; the rescan below then sees only what
+    # is really on disk
+    issueids = sorted(set((r['IssueID'],) for r in undone
+                          if r['Kind'] == 'move' and r['IssueID']))
+    if issueids:
+        db.action("UPDATE issues SET Status='Skipped', Location=NULL WHERE IssueID=?"
+                  " AND Status IN ('Downloaded', 'Archived')", issueids, executemany=True)
+        db.action("DELETE FROM snatched WHERE IssueID=? AND Provider='Orphan'"
+                  " AND Status='Post-Processed'", issueids, executemany=True)
+    if before or pending:
+        # a batch with nothing left to undo says nothing about its groups, which
+        # a later batch may have filed since
+        group_status = 'partial' if result.skipped else 'reverted'
+        db.action("UPDATE orphan_groups SET Status=? WHERE GroupID IN"
+                  " (SELECT DISTINCT GroupID FROM orphan_moves WHERE BatchID=?"
+                  " AND GroupID IS NOT NULL)", [group_status, batch_id])
     rows = db.select('SELECT ComicID FROM orphan_moves WHERE BatchID=? LIMIT 1', [batch_id])
     if rows and rows[0]['ComicID']:
         deps.rescan(rows[0]['ComicID'])

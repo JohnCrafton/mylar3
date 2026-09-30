@@ -27,7 +27,7 @@ class FakeDB(object):
         cursor.execute('CREATE TABLE comics (ComicID TEXT, ComicName TEXT,'
                        ' ComicYear TEXT, ComicLocation TEXT, Status TEXT)')
         cursor.execute('CREATE TABLE issues (IssueID TEXT, ComicID TEXT,'
-                       ' Issue_Number TEXT, Location TEXT)')
+                       ' Issue_Number TEXT, Location TEXT, Status TEXT)')
         cursor.execute('CREATE TABLE snatched (IssueID TEXT, ComicID TEXT,'
                        ' ComicName TEXT, Issue_Number TEXT, Size INTEGER,'
                        ' DateAdded TEXT, Status TEXT, Provider TEXT, FolderName TEXT)')
