@@ -186,3 +186,86 @@ def candidate_summary(ranked, n=5):
     """What the page needs of the top candidates, and nothing else."""
     keys = ('comicid', 'name', 'comicyear', 'issues', 'publisher', 'score', 'comicimage')
     return [dict((k, c.get(k)) for k in keys) for c in (ranked or [])[:n]]
+
+
+Move = collections.namedtuple('Move', 'kind orphanid source destination issueid')
+SeriesPlan = collections.namedtuple('SeriesPlan', 'moves skipped')
+
+
+def keeper_rank(row):
+    """Sort key for copies of one issue; the first is the one kept.
+
+    Largest first (the fuller scan), then .cbz over .cbr, then the name
+    without a "(1)" copy suffix, then the shorter name.
+    """
+    name = row.get('FileName') or os.path.basename(row['FilePath'])
+    stem, ext = os.path.splitext(name)
+    return (-(row.get('FileSize') or 0),
+            0 if ext.lower() == '.cbz' else 1,
+            1 if _COPY_SUFFIX.search(stem) else 0,
+            len(name),
+            name)
+
+
+def park_destination(source, library_root):
+    """Where a duplicate goes: its own path, mirrored under _duplicates/."""
+    inside = source.startswith(os.path.join(library_root, ''))
+    relative = (os.path.relpath(source, library_root) if inside
+                else source.lstrip(os.sep))
+    return os.path.join(library_root, DUPLICATES_DIR, relative)
+
+
+def plan_series(files, issues, has_file, destination_dir, name_for, library_root):
+    """Every move filing these files into one series would make.
+
+    files:    orphan rows for the series (across all its groups)
+    issues:   Mylar's issue rows for the series (IssueID, Issue_Number, Location)
+    has_file: issue -> whether Mylar's recorded file for it is really on disk
+    name_for: (orphan, issue) -> the filed file name
+
+    A file whose number matches no issue is skipped - left an orphan - rather
+    than guessed at.
+    """
+    by_issue = collections.OrderedDict()
+    skipped = []
+    for row in files:
+        issue = orphans.match_issue(issues, row.get('ParsedIssue'))
+        if issue is None:
+            skipped.append(row['OrphanID'])
+            continue
+        by_issue.setdefault(issue['IssueID'], (issue, []))[1].append(row)
+
+    moves = []
+    for issueid, (issue, rows) in by_issue.items():
+        ranked = sorted(rows, key=keeper_rank)
+        # an issue Mylar already has on disk keeps that file; every orphan copy
+        # of it is a duplicate
+        keeper = None if has_file(issue) else ranked[0]
+        for row in ranked:
+            if row is keeper:
+                destination = os.path.join(destination_dir, name_for(row, issue))
+                moves.append(Move('move', row['OrphanID'], row['FilePath'],
+                                  destination, issueid))
+            else:
+                moves.append(Move('park', row['OrphanID'], row['FilePath'],
+                                  park_destination(row['FilePath'], library_root),
+                                  issueid))
+    return SeriesPlan(tuple(moves), tuple(skipped))
+
+
+def batch_blockers(enable_check_folder, check_folder, library_root, job_running):
+    """Reasons not to start moving files, for the user to read. Empty means go."""
+    blockers = []
+    if job_running:
+        blockers.append('Another orphan job is already running.')
+    if not library_root:
+        blockers.append('No Comic Location is set, so there is nowhere to file to.')
+    elif enable_check_folder and check_folder:
+        watched = os.path.join(os.path.abspath(check_folder), '')
+        library = os.path.join(os.path.abspath(library_root), '')
+        if library.startswith(watched):
+            blockers.append(
+                'The folder monitor watches %s, which contains the library. It'
+                ' would post-process files while they are being moved. Point it'
+                ' at your downloads folder first.' % check_folder)
+    return blockers

@@ -160,3 +160,95 @@ def test_candidate_summary_keeps_what_the_page_shows():
     assert summary == [{'comicid': '1', 'name': 'Fables', 'comicyear': '2002',
                         'issues': '161', 'publisher': 'Vertigo', 'score': 100,
                         'comicimage': 'http://x/1.jpg'}]
+
+
+# --- planning a series ------------------------------------------------------
+
+def _issues(*numbers, **located):
+    return [{'IssueID': 'i%s' % n, 'Issue_Number': str(n),
+             'Location': located.get('n%s' % n)} for n in numbers]
+
+
+def _name_for(orphan_row, issue):
+    return 'Series %03d.cbz' % int(issue['Issue_Number'])
+
+
+def _never_on_disk(issue):
+    return False
+
+
+@pytest.mark.unit
+def test_keeper_is_largest_then_cbz_then_plainest_name():
+    rows = [orphan('/l/F/F 001 (1).cbz', FileSize=50),
+            orphan('/l/F/F 001.cbr', FileSize=50),
+            orphan('/l/F/F 001.cbz', FileSize=50),
+            orphan('/l/F/F 001 (2).cbz', FileSize=49)]
+    assert [r['FileName'] for r in sorted(rows, key=ob.keeper_rank)] == [
+        'F 001.cbz', 'F 001 (1).cbz', 'F 001.cbr', 'F 001 (2).cbz']
+
+
+@pytest.mark.unit
+def test_park_destination_mirrors_the_path_under_the_library():
+    assert ob.park_destination('/lib/Fables/Vol 1/F 001 (1).cbz', '/lib') == \
+        '/lib/_duplicates/Fables/Vol 1/F 001 (1).cbz'
+    # outside the library: keep the whole path rather than collide
+    assert ob.park_destination('/elsewhere/x/F.cbz', '/lib') == \
+        '/lib/_duplicates/elsewhere/x/F.cbz'
+
+
+@pytest.mark.unit
+def test_plan_series_moves_one_per_issue_and_parks_the_rest():
+    files = [orphan('/l/F/F 001.cbz', ParsedIssue='001', FileSize=50),
+             orphan('/l/F/F 001 (1).cbz', ParsedIssue='001', FileSize=49),
+             orphan('/l/F/F 002.cbz', ParsedIssue='002', FileSize=40)]
+    plan = ob.plan_series(files, _issues(1, 2), _never_on_disk, '/l/Fables (2002)',
+                          _name_for, '/l')
+    assert [(m.kind, m.orphanid, m.destination, m.issueid) for m in plan.moves] == [
+        ('move', 'F 001.cbz', '/l/Fables (2002)/Series 001.cbz', 'i1'),
+        ('park', 'F 001 (1).cbz', '/l/_duplicates/F/F 001 (1).cbz', 'i1'),
+        ('move', 'F 002.cbz', '/l/Fables (2002)/Series 002.cbz', 'i2')]
+    assert plan.skipped == ()
+
+
+@pytest.mark.unit
+def test_plan_series_skips_files_it_cannot_map_rather_than_guessing():
+    files = [orphan('/l/F/F 001.cbz', ParsedIssue='001'),
+             orphan('/l/F/F special.cbz', ParsedIssue=None),
+             orphan('/l/F/F 999.cbz', ParsedIssue='999')]
+    plan = ob.plan_series(files, _issues(1), _never_on_disk, '/l/F (2002)', _name_for, '/l')
+    assert [m.orphanid for m in plan.moves] == ['F 001.cbz']
+    assert plan.skipped == ('F special.cbz', 'F 999.cbz')
+
+
+@pytest.mark.unit
+def test_plan_series_parks_every_copy_of_an_issue_mylar_already_has():
+    files = [orphan('/l/F/F 001.cbz', ParsedIssue='001')]
+    plan = ob.plan_series(files, _issues(1, n1='F 001 (2002).cbz'),
+                          lambda issue: True, '/l/F (2002)', _name_for, '/l')
+    assert [(m.kind, m.orphanid) for m in plan.moves] == [('park', 'F 001.cbz')]
+
+
+@pytest.mark.unit
+def test_plan_series_ignores_a_recorded_file_that_is_not_on_disk():
+    # Mylar's row says issue 1 has a file, but the file is gone - the orphan is
+    # the only copy, so it moves in instead of being parked beside a ghost
+    files = [orphan('/l/F/F 001.cbz', ParsedIssue='001')]
+    plan = ob.plan_series(files, _issues(1, n1='gone.cbz'), _never_on_disk,
+                          '/l/F (2002)', _name_for, '/l')
+    assert [(m.kind, m.orphanid) for m in plan.moves] == [('move', 'F 001.cbz')]
+
+
+# --- guards -----------------------------------------------------------------
+
+@pytest.mark.unit
+def test_batch_blockers_refuse_a_folder_monitor_over_the_library():
+    assert ob.batch_blockers(True, '/media', '/media', False) != []
+    assert ob.batch_blockers(True, '/', '/media', False) != []
+    assert ob.batch_blockers(True, '/downloads', '/media', False) == []
+    assert ob.batch_blockers(False, '/media', '/media', False) == []
+
+
+@pytest.mark.unit
+def test_batch_blockers_refuse_a_second_job_and_a_missing_library():
+    assert len(ob.batch_blockers(False, None, '/media', True)) == 1
+    assert len(ob.batch_blockers(False, None, None, False)) == 1

@@ -1078,3 +1078,12 @@ def test_insert_rows_keeps_an_existing_row_for_the_same_file():
 
     assert db.execute('SELECT FilePath, Status FROM orphans ORDER BY FilePath'
                       ).fetchall() == [('/a.cbz', 'identified'), ('/b.cbz', 'new')]
+
+
+@pytest.mark.integration
+def test_survey_ignores_parked_duplicates(tmp_path):
+    (tmp_path / '_duplicates' / 'F').mkdir(parents=True)
+    make_cbz(tmp_path / '_duplicates' / 'F' / 'parked.cbz', pages=2)
+    make_cbz(tmp_path / 'loose.cbz', pages=2)
+    report = orphans.survey(str(tmp_path))
+    assert [r['FileName'] for r in report.found] == ['loose.cbz']
