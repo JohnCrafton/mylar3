@@ -53,11 +53,16 @@ def _note(db, batch_id, seq, error):
               [error, batch_id, seq])
 
 
-def _move_one(source, destination, rename):
-    """None when the file is at destination afterwards, else why not."""
+def _move_one(source, destination, rename, was_moving=False):
+    """None when the file is at destination afterwards, else why not.
+
+    was_moving indicates if the row's Status was already 'moving' when called,
+    meaning a rename attempt started before a crash. Only in that case do we
+    treat a missing source + existing destination as success (crash recovery).
+    """
     if not os.path.lexists(source):
-        if os.path.isfile(destination):
-            # renamed before a crash could record it
+        if os.path.isfile(destination) and was_moving:
+            # renamed before a crash could record it; this is recovery
             return None
         return 'The file is no longer at %s' % source
     if os.path.lexists(destination):
@@ -66,6 +71,9 @@ def _move_one(source, destination, rename):
         parent = os.path.dirname(destination)
         if not os.path.isdir(parent):
             os.makedirs(parent)
+        # Check-then-rename window: another writer could create destination between
+        # the check above and this rename. POSIX rename replaces atomically, so we
+        # accept the race and replace.
         rename(source, destination)
     except OSError as e:
         if e.errno == errno.EXDEV:
@@ -81,14 +89,17 @@ def execute(db, batch_id, now, stop=lambda: False, rename=os.rename):
     stop is asked before each file; answering True leaves the rest planned for
     a later call to pick up.
     """
-    rows = db.select("SELECT Seq, Source, Destination FROM orphan_moves"
+    rows = db.select("SELECT Seq, Source, Destination, Status FROM orphan_moves"
                      " WHERE BatchID=? AND Kind IN ('move', 'park')"
-                     " AND Status IN ('planned', 'failed') ORDER BY Seq", [batch_id])
+                     " AND Status IN ('planned', 'failed', 'moving') ORDER BY Seq", [batch_id])
     done = failed = 0
     for row in rows:
         if stop():
             return MoveResult(done, failed, True)
-        error = _move_one(row['Source'], row['Destination'], rename)
+        was_moving = row['Status'] == 'moving'
+        # Mark the row as 'moving' to record that a rename attempt is starting
+        _mark(db, batch_id, row['Seq'], 'moving', None, now())
+        error = _move_one(row['Source'], row['Destination'], rename, was_moving=was_moving)
         _mark(db, batch_id, row['Seq'], 'failed' if error else 'done', error, now())
         if error:
             failed += 1
@@ -120,7 +131,11 @@ def remove_empty_dirs(db, batch_id, library_root, now, rmdir=os.rmdir):
         folder = os.path.dirname(os.path.abspath(row['Source']))
         while folder.startswith(inside):
             candidates.add(folder)
-            folder = os.path.dirname(folder)
+            parent = os.path.dirname(folder)
+            if parent == folder:
+                # dirname(folder) == folder means we hit the root; stop climbing
+                break
+            folder = parent
 
     removed = []
     for folder in sorted(candidates, key=lambda p: -p.count(os.sep)):
@@ -152,7 +167,12 @@ def revert(db, batch_id, now, rename=os.rename):
     for row in rows:
         if row['Kind'] == 'rmdir':
             if not os.path.isdir(row['Source']):
-                os.makedirs(row['Source'])
+                try:
+                    os.makedirs(row['Source'])
+                except OSError as e:
+                    skipped.append((row['Source'], str(e)))
+                    _note(db, batch_id, row['Seq'], str(e))
+                    continue
             _mark(db, batch_id, row['Seq'], 'reverted', None, now())
             continue
 
@@ -177,6 +197,14 @@ def revert(db, batch_id, now, rename=os.rename):
         else:
             _mark(db, batch_id, row['Seq'], 'reverted', None, now())
             reverted += 1
+
+    # After restoring all done rows, cancel any remaining rows that are still
+    # planned/failed/moving so a later execute() can't re-move files of a
+    # reverted batch
+    db.action('UPDATE orphan_moves SET Status=? WHERE BatchID=?'
+              ' AND Kind IN (\'move\', \'park\') AND Status IN (\'planned\', \'failed\', \'moving\')',
+              ['cancelled', batch_id])
+
     return RevertResult(reverted, tuple(skipped))
 
 

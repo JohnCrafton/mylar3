@@ -81,6 +81,9 @@ def test_execute_treats_an_already_moved_file_as_done(tmp_path):
     dst = _file(str(tmp_path / 'S' / 'a.cbz'))
     db = FakeDB()
     batch = _plan(db, [ob.Move('move', 'o1', str(tmp_path / 'a.cbz'), dst, 'i1')])
+    # Simulate crash: mark the row as 'moving' to indicate rename attempt started
+    db.action('UPDATE orphan_moves SET Status=? WHERE BatchID=? AND Seq=?',
+              ['moving', batch, 0])
     assert om.execute(db, batch, _now) == om.MoveResult(1, 0, False)
     assert _statuses(db) == [('move', 'done')]
 
@@ -174,3 +177,130 @@ def test_revert_skips_a_file_whose_original_path_is_taken(tmp_path):
     assert result.skipped == ((a, 'original path is occupied'),)
     assert open(a, 'rb').read() == b'someone else'
     assert open(dst, 'rb').read() == b'A'
+
+
+@pytest.mark.integration
+def test_revert_continues_when_removed_dir_creation_fails(tmp_path):
+    # Fix 1: revert() should skip rmdir rows that can't be recreated, not abort
+    lib = str(tmp_path)
+    a = _file(os.path.join(lib, 'F', 'a.cbz'), b'A')
+    b = _file(os.path.join(lib, 'G', 'b.cbz'), b'B')
+    db = FakeDB()
+    batch = _plan(db, [
+        ob.Move('move', 'o1', a, os.path.join(lib, 'Fables (2002)', 'a.cbz'), 'i1'),
+        ob.Move('move', 'o2', b, os.path.join(lib, 'Grendel (2005)', 'b.cbz'), 'i2')])
+    om.execute(db, batch, _now)
+    om.remove_empty_dirs(db, batch, lib, _now)
+
+    # Replace one removed directory (F) with a regular file to block its recreation
+    _file(os.path.join(lib, 'F'), b'blocking_file')
+
+    result = om.revert(db, batch, _now)
+
+    # Should skip the F rmdir, continue, and restore both files successfully
+    # (G can be recreated, and G/b.cbz can be restored)
+    assert result.reverted >= 1  # At least one file or dir restored
+    # The F rmdir should be in skipped
+    skipped_paths = [s[0] for s in result.skipped]
+    assert os.path.join(lib, 'F') in skipped_paths
+    # G should have been recreated successfully
+    assert os.path.isdir(os.path.join(lib, 'G'))
+    # b.cbz should be restored
+    assert open(b, 'rb').read() == b'B'
+
+
+@pytest.mark.integration
+def test_execute_with_crash_recovery_mark_moving_state(tmp_path):
+    # Fix 2a: Test updated to set row to 'moving' before execute
+    # Simulates a crash mid-rename: row was marked 'moving', then renamed, then process died
+    dst = _file(str(tmp_path / 'S' / 'a.cbz'))
+    db = FakeDB()
+    batch = _plan(db, [ob.Move('move', 'o1', str(tmp_path / 'a.cbz'), dst, 'i1')])
+
+    # Simulate crash: mark the row as 'moving' to indicate rename attempt started
+    db.action('UPDATE orphan_moves SET Status=? WHERE BatchID=? AND Seq=?',
+              ['moving', batch, 0])
+
+    result = om.execute(db, batch, _now)
+
+    # Should treat destination-exists as done (file was already moved before crash)
+    assert result == om.MoveResult(1, 0, False)
+    assert _statuses(db) == [('move', 'done')]
+
+
+@pytest.mark.integration
+def test_execute_fails_when_row_planned_and_foreign_file_at_destination(tmp_path):
+    # Fix 2b: If row is 'planned' (no rename attempt yet) and source is gone but
+    # destination has a foreign file, that's a failure, not success
+    src = str(tmp_path / 'a.cbz')
+    dst = _file(str(tmp_path / 'S' / 'a.cbz'), b'foreign')
+    db = FakeDB()
+    batch = _plan(db, [ob.Move('move', 'o1', src, dst, 'i1')])
+
+    # Don't create the source file; it's gone
+    # But destination exists with a foreign file
+
+    result = om.execute(db, batch, _now)
+
+    # Should fail because source is gone but this wasn't a 'moving' row (no crash recovery)
+    assert result == om.MoveResult(0, 1, False)
+    assert _statuses(db) == [('move', 'failed')]
+    assert 'no longer' in db.select('SELECT Error FROM orphan_moves')[0]['Error']
+    # Foreign file should remain untouched
+    assert open(dst, 'rb').read() == b'foreign'
+
+
+@pytest.mark.integration
+def test_remove_empty_dirs_with_root_slash_does_not_hang(tmp_path):
+    # Fix 4: library_root='/' should not hang when climbing
+    src = str(tmp_path / 'a.cbz')
+    db = FakeDB()
+    batch = _plan(db, [ob.Move('move', 'o1', src, str(tmp_path / 'S' / 'a.cbz'), 'i1')])
+
+    # Create source and execute
+    _file(src)
+    om.execute(db, batch, _now)
+
+    # Record calls to rmdir to verify it's not called on '/'
+    rmdir_calls = []
+    def stub_rmdir(path):
+        rmdir_calls.append(path)
+
+    # Call with library_root='/' - should not hang, and should not call rmdir on '/'
+    removed = om.remove_empty_dirs(db, batch, '/', _now, rmdir=stub_rmdir)
+
+    assert '/' not in rmdir_calls
+    # Should return successfully without hanging
+
+
+@pytest.mark.integration
+def test_revert_cancels_planned_failed_rows_after_restoring_done_rows(tmp_path):
+    # Fix 5: After revert, remaining 'planned'/'failed'/'moving' rows should become 'cancelled'
+    # This prevents a later execute() from re-moving files of a batch the user undid
+    a = _file(str(tmp_path / 'a.cbz'))
+    b = _file(str(tmp_path / 'b.cbz'))
+    db = FakeDB()
+    batch = _plan(db, [
+        ob.Move('move', 'o1', a, str(tmp_path / 'S' / 'a.cbz'), 'i1'),
+        ob.Move('move', 'o2', b, str(tmp_path / 'S' / 'b.cbz'), 'i2')])
+
+    calls = []
+    def stop_after_one():
+        calls.append(1)
+        return len(calls) > 1
+
+    # Execute only the first move
+    om.execute(db, batch, _now, stop=stop_after_one)
+    assert _statuses(db) == [('move', 'done'), ('move', 'planned')]
+
+    # Revert the batch
+    om.revert(db, batch, _now)
+
+    # After revert, the second row should be 'cancelled', not 'planned'
+    second_row_status = db.select('SELECT Status FROM orphan_moves WHERE BatchID=? AND Seq=1', [batch])[0]['Status']
+    assert second_row_status == 'cancelled'
+
+    # Execute again should do nothing (the cancelled row is not executed)
+    result = om.execute(db, batch, _now)
+    assert result == om.MoveResult(0, 0, False)
+    assert os.path.isfile(b)  # Second file was never moved
