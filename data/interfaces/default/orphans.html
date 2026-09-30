@@ -8,6 +8,7 @@
 		<div id="subhead_menu">
 %if mylar.CONFIG.ENABLE_ORPHANS:
 			<a id="menu_link_scan" href="#" onclick="scanOrphans();return false;">Scan for Orphans</a>
+			<a id="menu_link_view" href="orphanGroups">Orphan Groups</a>
 %endif
 			<a id="menu_link_new" href="importResults">Import Results</a>
 			<a id="menu_link_edit" href="config">Settings</a>
@@ -514,7 +515,8 @@
         }
 
         function initThisPage(){
-            $('#orphans_table').dataTable({
+            var searchParam = new URLSearchParams(location.search).get('search');
+            var config = {
                 "destroy": true,
                 "sDom": '<"clear"f><"clear"lp><"clear">rt<"clear"ip>',
                 "processing": true,
@@ -544,7 +546,11 @@
                     "sInfo": "Showing _START_ to _END_ of _TOTAL_ files",
                     "sInfoEmpty": "Showing 0 to 0 of 0 files"
                 }
-            });
+            };
+            if (searchParam){
+                config.oSearch = {sSearch: searchParam};
+            }
+            $('#orphans_table').dataTable(config);
         }
 
         $(document).ready(function(){

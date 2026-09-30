@@ -69,6 +69,8 @@ from mylar import (
     moveit,
     navmenu,
     notifiers,
+    orphan_batches,
+    orphan_jobs,
     orphans as orphanlib,
     parseit,
     PostProcessor,
@@ -1185,8 +1187,11 @@ class WebInterface(object):
         rows = myDB.select('SELECT * FROM orphans ORDER BY Status, FileName')
         results = []
         for row in rows:
-            if sSearch and sSearch.lower() not in (row['FileName'] or '').lower():
-                continue
+            if sSearch:
+                search_lower = sSearch.lower()
+                if not (search_lower in (row['FileName'] or '').lower() or
+                        search_lower in (row['FilePath'] or '').lower()):
+                    continue
             results.append([
                 row['FileName'],
                 row['ParsedSeries'],
@@ -1217,20 +1222,25 @@ class WebInterface(object):
             return json.dumps({'status': 'failure',
                                'message': 'No orphan scan directory configured'})
 
+        if not orphan_jobs.STATE.begin('scan'):
+            return json.dumps({'status': 'failure',
+                               'message': 'Another orphan job is already running.'})
+        mylar.ORPHAN_SCAN_RUNNING = True
+
         def scan():
-            myDB = db.DBConnection()
-            known = [r['FilePath'] for r in myDB.select('SELECT FilePath FROM orphans')]
-            # files already filed to a series are not orphans, and a scan of
-            # the whole library would otherwise decompress every one of them
-            tracked = orphanlib.tracked_file_paths(
-                (r['ComicLocation'], r['Location']) for r in myDB.select(
-                    'SELECT c.ComicLocation, i.Location FROM issues i'
-                    ' JOIN comics c ON c.ComicID = i.ComicID'
-                    ' UNION ALL'
-                    ' SELECT c.ComicLocation, a.Location FROM annuals a'
-                    ' JOIN comics c ON c.ComicID = a.ComicID'))
-            mylar.ORPHAN_SCAN_RUNNING = True
+            message = 'Scan finished.'
             try:
+                myDB = db.DBConnection()
+                known = [r['FilePath'] for r in myDB.select('SELECT FilePath FROM orphans')]
+                # files already filed to a series are not orphans, and a scan of
+                # the whole library would otherwise decompress every one of them
+                tracked = orphanlib.tracked_file_paths(
+                    (r['ComicLocation'], r['Location']) for r in myDB.select(
+                        'SELECT c.ComicLocation, i.Location FROM issues i'
+                        ' JOIN comics c ON c.ComicID = i.ComicID'
+                        ' UNION ALL'
+                        ' SELECT c.ComicLocation, a.Location FROM annuals a'
+                        ' JOIN comics c ON c.ComicID = a.ComicID'))
                 report = orphanlib.survey(scan_dir, known_paths=known,
                                           tracked_paths=tracked)
                 now = helpers.now()
@@ -1249,14 +1259,23 @@ class WebInterface(object):
                                len(report.missing_tracked)))
                 for path in report.missing_tracked:
                     logger.fdebug('[ORPHANS] Tracked but missing: %s' % path)
+                message = 'Scan finished: %s new orphans.' % len(report.found)
             except Exception as e:
-                logger.error('[ORPHANS] Scan failed: %s' % e)
+                message = 'Scan failed: %s' % e
+                logger.error('[ORPHANS] %s' % message)
             finally:
                 mylar.ORPHAN_SCAN_RUNNING = False
+                orphan_jobs.STATE.finish(message)
 
         # Threaded: probing means decompressing every archive, so a large
         # directory would otherwise hold the request open for minutes.
-        threading.Thread(target=scan, name='ORPHAN-SCAN').start()
+        try:
+            threading.Thread(target=scan, name='ORPHAN-SCAN').start()
+        except Exception as e:
+            mylar.ORPHAN_SCAN_RUNNING = False
+            orphan_jobs.STATE.finish('Scan failed to start: %s' % e)
+            return json.dumps({'status': 'failure',
+                               'message': 'Scan failed to start: %s' % e})
         return json.dumps({'status': 'success',
                            'message': 'Scanning %s in the background' % scan_dir})
     orphanScan.exposed = True
@@ -1693,6 +1712,238 @@ class WebInterface(object):
                            'message': 'Adding the series - this can take a moment.'
                                       ' Try filing again once it appears.'})
     orphanAddSeries.exposed = True
+
+    # --- orphan groups: identify a folder at a time, file a series at a time ---
+
+    def orphanGroups(self, **kwargs):
+        if not mylar.CONFIG.ENABLE_ORPHANS:
+            raise cherrypy.HTTPRedirect("orphans")
+        myDB = db.DBConnection()
+        return serve_template(templatename="orphan_groups.html", title="Orphan Groups",
+                              groups=orphan_jobs.load_groups(myDB),
+                              batches=orphan_jobs.load_batches(myDB),
+                              job=orphan_jobs.STATE.snapshot())
+    orphanGroups.exposed = True
+
+    def orphanGroupsStatus(self, **kwargs):
+        return json.dumps(orphan_jobs.STATE.snapshot())
+    orphanGroupsStatus.exposed = True
+
+    def orphanGroupsStop(self, **kwargs):
+        orphan_jobs.STATE.request_stop()
+        return json.dumps({'status': 'success',
+                           'message': 'Stopping after the current item.'})
+    orphanGroupsStop.exposed = True
+
+    def orphanGroupsIdentify(self, **kwargs):
+        if not mylar.CONFIG.ENABLE_ORPHANS:
+            return json.dumps({'status': 'failure', 'message': 'Orphans is disabled'})
+        if not mylar.CONFIG.COMICVINE_API:
+            return json.dumps({'status': 'failure',
+                               'message': 'No ComicVine API key is set.'})
+        pace = max(mylar.CONFIG.CVAPI_RATE or 0, orphan_batches.IDENTIFY_MIN_PACE)
+        if not orphan_jobs.STATE.begin('identify'):
+            return json.dumps({'status': 'failure',
+                               'message': 'Another orphan job is already running.'})
+
+        def search(series, issue, year):
+            try:
+                return mb.findComic(series, mode='series',
+                                    issue=orphanlib.as_search_issue(issue),
+                                    limityear=year)
+            except Exception as e:
+                logger.warn('[ORPHANS] ComicVine search for %s failed: %s' % (series, e))
+                return False
+
+        def job():
+            message = 'Identify finished.'
+            try:
+                summary = orphan_jobs.identify_groups(
+                    db.DBConnection(), search, helpers.now, orphan_jobs.STATE.sleep, pace,
+                    stop=orphan_jobs.STATE.should_stop, progress=orphan_jobs.STATE.update)
+                message = ('Identified: %(auto)s auto, %(review)s to review,'
+                           ' %(mixed)s mixed.' % summary)
+                if summary['stopped']:
+                    message += ' ' + summary['reason']
+                logger.info('[ORPHANS] %s' % message)
+            except Exception as e:
+                message = 'Identify failed: %s' % e
+                logger.error('[ORPHANS] %s' % message)
+            finally:
+                orphan_jobs.STATE.finish(message)
+
+        try:
+            threading.Thread(target=job, name='ORPHAN-IDENTIFY').start()
+        except Exception as e:
+            orphan_jobs.STATE.finish('Could not start: %s' % e)
+            return json.dumps({'status': 'failure',
+                               'message': 'Could not start: %s' % e})
+        return json.dumps({'status': 'success',
+                           'message': 'Identifying groups in the background - about one'
+                                      ' search every %s seconds.' % pace})
+    orphanGroupsIdentify.exposed = True
+
+    def orphanGroupsApprove(self, exclude='', **kwargs):
+        if not mylar.CONFIG.ENABLE_ORPHANS:
+            return json.dumps({'status': 'failure', 'message': 'Orphans is disabled'})
+        if isinstance(exclude, (list, tuple)):
+            exclude = ','.join(exclude)
+        count = orphan_jobs.approve_auto(
+            db.DBConnection(), [g for g in exclude.split(',') if g])
+        return json.dumps({'status': 'success', 'message': 'Approved %s groups.' % count})
+    orphanGroupsApprove.exposed = True
+
+    def orphanGroup(self, GroupID=None, **kwargs):
+        if not mylar.CONFIG.ENABLE_ORPHANS:
+            return json.dumps({'status': 'failure', 'message': 'Orphans is disabled'})
+        groups = orphan_jobs.load_groups(db.DBConnection())
+        for members in groups.values():
+            for group in members:
+                if group['GroupID'] == GroupID:
+                    return json.dumps(dict(group, status='success'))
+        return json.dumps({'status': 'failure', 'message': 'Unknown group'})
+    orphanGroup.exposed = True
+
+    def orphanGroupPick(self, GroupID=None, ComicID=None, **kwargs):
+        if not mylar.CONFIG.ENABLE_ORPHANS:
+            return json.dumps({'status': 'failure', 'message': 'Orphans is disabled'})
+        if not ComicID:
+            return json.dumps({'status': 'failure', 'message': 'Pick a series first.'})
+        myDB = db.DBConnection()
+        if not myDB.select('SELECT 1 FROM orphan_groups WHERE GroupID=?', [GroupID]):
+            return json.dumps({'status': 'failure', 'message': 'Unknown group.'})
+        ok = orphan_jobs.pick_series(myDB, GroupID, ComicID)
+        return json.dumps({'status': 'success' if ok else 'failure',
+                           'message': 'Approved.' if ok else 'That group is already filed.'})
+    orphanGroupPick.exposed = True
+
+    def orphanGroupSkip(self, GroupID=None, **kwargs):
+        if not mylar.CONFIG.ENABLE_ORPHANS:
+            return json.dumps({'status': 'failure', 'message': 'Orphans is disabled'})
+        myDB = db.DBConnection()
+        if not myDB.select('SELECT 1 FROM orphan_groups WHERE GroupID=?', [GroupID]):
+            return json.dumps({'status': 'failure', 'message': 'Unknown group.'})
+        ok = orphan_jobs.skip_group(myDB, GroupID)
+        return json.dumps({'status': 'success' if ok else 'failure',
+                           'message': 'Skipped.' if ok else 'That group is already filed.'})
+    orphanGroupSkip.exposed = True
+
+    def _orphan_file_deps(self, myDB):
+        """What the file job needs from the rest of Mylar."""
+        def add(comicid):
+            args, kwargs = orphanlib.series_add_request(comicid)
+            self.addbyid(*args, **kwargs)
+
+        def ensure_series(comicid):
+            return orphan_jobs.wait_for_series(
+                myDB, comicid, add, orphan_jobs.STATE.sleep, timeout=900,
+                stop=orphan_jobs.STATE.should_stop)
+
+        def name_for(comic, record, issue):
+            return self._orphan_filed_name(record, comic, issue)[0]
+
+        def record_history(record, comic, issue, destination):
+            entry = orphanlib.history_row(record, comic, issue, destination, helpers.now())
+            myDB.upsert('snatched', entry, {'IssueID': entry['IssueID'],
+                                            'DateAdded': entry['DateAdded']})
+
+        return orphan_jobs.FileDeps(
+            ensure_series=ensure_series, name_for=name_for,
+            rescan=updater.forceRescan, record_history=record_history,
+            now=helpers.now, clock=time.time, stop=orphan_jobs.STATE.should_stop,
+            library_root=mylar.CONFIG.DESTINATION_DIR,
+            progress=orphan_jobs.STATE.update, log=logger.info)
+
+    def _orphan_background(self, kind, work):
+        """Run work(myDB, deps) as the one orphan job, or say why not."""
+        blockers = orphan_batches.batch_blockers(
+            mylar.CONFIG.ENABLE_CHECK_FOLDER, mylar.CONFIG.CHECK_FOLDER,
+            mylar.CONFIG.DESTINATION_DIR, orphan_jobs.STATE.snapshot()['running'])
+        if blockers:
+            return json.dumps({'status': 'failure', 'message': ' '.join(blockers)})
+        if not orphan_jobs.STATE.begin(kind):
+            return json.dumps({'status': 'failure',
+                               'message': 'Another orphan job is already running.'})
+
+        def job():
+            message = '%s finished.' % kind.capitalize()
+            try:
+                myDB = db.DBConnection()
+                message = work(myDB, self._orphan_file_deps(myDB)) or message
+            except Exception as e:
+                message = '%s failed: %s' % (kind.capitalize(), e)
+                logger.error('[ORPHANS] %s' % message)
+            finally:
+                orphan_jobs.STATE.finish(message)
+
+        try:
+            threading.Thread(target=job, name='ORPHAN-%s' % kind.upper()).start()
+        except Exception as e:
+            orphan_jobs.STATE.finish('Could not start: %s' % e)
+            return json.dumps({'status': 'failure',
+                               'message': 'Could not start: %s' % e})
+        return json.dumps({'status': 'success', 'message': 'Started - see progress above.'})
+
+    def orphanGroupsFile(self, **kwargs):
+        if not mylar.CONFIG.ENABLE_ORPHANS:
+            return json.dumps({'status': 'failure', 'message': 'Orphans is disabled'})
+
+        def work(myDB, deps):
+            stamp = datetime.datetime.now().strftime('%Y%m%d-%H%M%S')
+            backup = orphan_batches.backup_database(db.dbFilename(), stamp)
+            logger.info('[ORPHANS] Database backed up to %s before filing' % backup)
+            results = orphan_jobs.run_file_job(myDB, deps, 'run-%s' % stamp)
+            return ('Filed %d series: %d moved, %d parked, %d failed. Backup: %s' % (
+                len(results), sum(r.moved for r in results),
+                sum(r.parked for r in results), sum(r.failed for r in results), backup))
+
+        return self._orphan_background('file', work)
+    orphanGroupsFile.exposed = True
+
+    def orphanBatchResume(self, BatchID=None, **kwargs):
+        if not mylar.CONFIG.ENABLE_ORPHANS:
+            return json.dumps({'status': 'failure', 'message': 'Orphans is disabled'})
+        if not db.DBConnection().select(
+            'SELECT 1 FROM orphan_moves WHERE BatchID=? LIMIT 1', [BatchID]):
+            return json.dumps({'status': 'failure', 'message': 'Unknown batch.'})
+
+        def work(myDB, deps):
+            r = orphan_jobs.resume_batch(myDB, BatchID, deps)
+            return r.error or ('Batch %s: %d moved, %d parked, %d failed.'
+                               % (BatchID, r.moved, r.parked, r.failed))
+
+        return self._orphan_background('resume', work)
+    orphanBatchResume.exposed = True
+
+    def orphanBatchRevert(self, BatchID=None, **kwargs):
+        if not mylar.CONFIG.ENABLE_ORPHANS:
+            return json.dumps({'status': 'failure', 'message': 'Orphans is disabled'})
+        if not db.DBConnection().select(
+            'SELECT 1 FROM orphan_moves WHERE BatchID=? LIMIT 1', [BatchID]):
+            return json.dumps({'status': 'failure', 'message': 'Unknown batch.'})
+
+        def work(myDB, deps):
+            r = orphan_jobs.revert_batch(myDB, BatchID, deps)
+            return 'Reverted %d files; %d could not be put back (see the log).' % (
+                r.reverted, len(r.skipped))
+
+        return self._orphan_background('revert', work)
+    orphanBatchRevert.exposed = True
+
+    def orphanRunRevert(self, RunID=None, **kwargs):
+        if not mylar.CONFIG.ENABLE_ORPHANS:
+            return json.dumps({'status': 'failure', 'message': 'Orphans is disabled'})
+        if not db.DBConnection().select(
+            'SELECT 1 FROM orphan_moves WHERE RunID=? LIMIT 1', [RunID]):
+            return json.dumps({'status': 'failure', 'message': 'Unknown run.'})
+
+        def work(myDB, deps):
+            results = orphan_jobs.revert_run(myDB, RunID, deps)
+            return 'Reverted run %s: %d files put back, %d could not be (see the log).' % (
+                RunID, sum(r.reverted for r in results), sum(len(r.skipped) for r in results))
+
+        return self._orphan_background('revert', work)
+    orphanRunRevert.exposed = True
 
     def read_orphan(self, OrphanID=None, page_num=0, size=None):
         """Page through an orphan in the existing web reader.

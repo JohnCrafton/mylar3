@@ -32,7 +32,7 @@ import math
 import re
 
 # Status values for an orphan record.
-ORPHAN_STATUSES = frozenset(['new', 'identified', 'filed', 'ignored'])
+ORPHAN_STATUSES = frozenset(['new', 'identified', 'filed', 'ignored', 'parked'])
 
 # Weights per signal. Only the signals actually available are counted, and the
 # raw total is rescaled against what was achievable - see score_candidate.
@@ -593,7 +593,9 @@ def survey(root, known_paths=None, tracked_paths=None):
     found = []
     seen = set()
     skipped_tracked = skipped_known = 0
-    for dirpath, _dirnames, filenames in os.walk(root):
+    for dirpath, dirnames, filenames in os.walk(root):
+        # parked duplicates were orphans once already; do not find them again
+        dirnames[:] = [d for d in dirnames if d != '_duplicates']
         for filename in sorted(filenames):
             if not filename.lower().endswith(COMIC_EXTENSIONS):
                 continue
