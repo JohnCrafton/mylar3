@@ -172,3 +172,58 @@ def test_job_state_allows_one_job_at_a_time():
     assert state.snapshot()['message'] == 'done'
     assert state.begin('file') is True
     assert state.should_stop() is False
+
+
+def _identified(db):
+    db.add_orphans(_fables(folder='/lib/A (2002)') + _fables(folder='/lib/B (2002)') + [
+        # one series, but half the files carry no number: review, not mixed
+        orphan('/lib/C/c1.cbz', OrphanID='c1', ParsedSeries='Fables', ParsedIssue='1'),
+        orphan('/lib/C/c2.cbz', OrphanID='c2', ParsedSeries='Fables', ParsedIssue=None)])
+    oj.identify_groups(db, lambda *a: _fables_result(), _now, _no_sleep, 20)
+    return dict((g['Folder'], g['GroupID']) for g in
+                [dict(r) for r in db.select('SELECT Folder, GroupID FROM orphan_groups')])
+
+
+@pytest.mark.integration
+def test_approve_auto_approves_everything_not_excluded():
+    db = FakeDB()
+    ids = _identified(db)
+    assert oj.approve_auto(db, [ids['/lib/B (2002)']]) == 1
+    status = dict((r['Folder'], r['Status']) for r in db.select('SELECT Folder, Status FROM orphan_groups'))
+    assert status == {'/lib/A (2002)': 'approved', '/lib/B (2002)': 'identified',
+                      '/lib/C': 'identified'}
+
+
+@pytest.mark.integration
+def test_pick_series_approves_a_review_group_but_not_a_filed_one():
+    db = FakeDB()
+    ids = _identified(db)
+    assert oj.pick_series(db, ids['/lib/C'], '99') is True
+    row = db.select('SELECT ComicID, Status FROM orphan_groups WHERE GroupID=?', [ids['/lib/C']])[0]
+    assert (row['ComicID'], row['Status']) == ('99', 'approved')
+    db.action("UPDATE orphan_groups SET Status='filed' WHERE GroupID=?", [ids['/lib/A (2002)']])
+    assert oj.pick_series(db, ids['/lib/A (2002)'], '99') is False
+    assert oj.pick_series(db, 'nope', '99') is False
+
+
+@pytest.mark.integration
+def test_skip_group():
+    db = FakeDB()
+    ids = _identified(db)
+    assert oj.skip_group(db, ids['/lib/C']) is True
+    assert db.select('SELECT Status FROM orphan_groups WHERE GroupID=?',
+                     [ids['/lib/C']])[0]['Status'] == 'skipped'
+
+
+@pytest.mark.integration
+def test_load_groups_splits_by_tier_and_decodes():
+    db = FakeDB()
+    _identified(db)
+    groups = oj.load_groups(db)
+    assert sorted(groups) == ['auto', 'mixed', 'review']
+    assert [g['Folder'] for g in groups['auto']] == ['/lib/A (2002)', '/lib/B (2002)']
+    first = groups['auto'][0]
+    assert first['Files'] == 3
+    assert first['Candidates'][0]['comicid'] == '25543'
+    assert first['Failed'] == []
+    assert first['FirstOrphanID'] is not None

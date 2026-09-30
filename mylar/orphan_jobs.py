@@ -154,3 +154,60 @@ def identify_groups(db, search, now, sleep, pace, stop=lambda: False,
             sleep(pace)
 
     return summary(False, None)
+
+
+def approve_auto(db, exclude=()):
+    """Approve every identified auto group except those excluded."""
+    excluded = [g for g in exclude if g]
+    query = ("UPDATE orphan_groups SET Status='approved'"
+             " WHERE Tier='auto' AND Status='identified'")
+    if excluded:
+        query += ' AND GroupID NOT IN (%s)' % ', '.join(['?'] * len(excluded))
+    return db.action(query, excluded).rowcount
+
+
+def pick_series(db, groupid, comicid):
+    """Approve a group against a series the user chose."""
+    return db.action("UPDATE orphan_groups SET ComicID=?, Status='approved'"
+                     " WHERE GroupID=? AND Status NOT IN ('filed', 'partial')",
+                     [comicid, groupid]).rowcount == 1
+
+
+def skip_group(db, groupid):
+    return db.action("UPDATE orphan_groups SET Status='skipped' WHERE GroupID=?"
+                     " AND Status NOT IN ('filed', 'partial')", [groupid]).rowcount == 1
+
+
+def load_groups(db):
+    """Groups for the page, split by tier, largest first."""
+    first = dict((r['GroupID'], r['OrphanID']) for r in db.select(
+        'SELECT GroupID, MIN(OrphanID) AS OrphanID FROM orphans'
+        ' WHERE GroupID IS NOT NULL GROUP BY GroupID'))
+    tiers = {'auto': [], 'review': [], 'mixed': []}
+    for row in db.select('SELECT * FROM orphan_groups'):
+        group = dict(row)
+        group['Evidence'] = json.loads(group['Evidence'] or '{}')
+        group['Candidates'] = json.loads(group['Candidates'] or '[]')
+        group['Failed'] = json.loads(group['Failed'] or '[]')
+        group['Files'] = group['Evidence'].get('files', 0)
+        group['FirstOrphanID'] = first.get(group['GroupID'])
+        tiers.setdefault(group['Tier'], []).append(group)
+    for members in tiers.values():
+        members.sort(key=lambda g: (-g['Files'], g['Folder']))
+    return tiers
+
+
+def load_batches(db):
+    """Filing batches, newest first, with their row counts."""
+    batches_ = collections.OrderedDict()
+    for row in db.select("SELECT BatchID, RunID, ComicID, Status, COUNT(*) AS n,"
+                         " MAX(WhenDone) AS WhenDone FROM orphan_moves"
+                         " WHERE Kind IN ('move', 'park')"
+                         " GROUP BY BatchID, RunID, ComicID, Status"
+                         " ORDER BY MAX(WhenDone) DESC"):
+        entry = batches_.setdefault(row['BatchID'], {
+            'BatchID': row['BatchID'], 'RunID': row['RunID'], 'ComicID': row['ComicID'],
+            'done': 0, 'failed': 0, 'planned': 0, 'reverted': 0, 'When': row['WhenDone']})
+        entry[row['Status']] = row['n']
+        entry['When'] = max(entry['When'] or '', row['WhenDone'] or '')
+    return sorted(batches_.values(), key=lambda b: b['When'] or '', reverse=True)
