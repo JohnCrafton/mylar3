@@ -33,7 +33,7 @@
             </p>
             <p>
                 <button type="button" class="og-action" id="btn_approve">Approve <span id="auto_count">${counts['auto'][0] | h}</span> auto groups</button>
-                <button type="button" class="og-action" data-action="orphanGroupsFile">File approved groups</button>
+                <button type="button" class="og-action" data-action="orphanGroupsFile" data-confirm="Move every approved group into your library? A database backup is taken first, and each batch can be reverted.">File approved groups</button>
                 <button type="button" id="btn_stop">Stop</button>
             </p>
 
@@ -46,11 +46,11 @@
 %if top:
                     <tr>
                         <td><input type="checkbox" class="auto_include" value="${g['GroupID'] | h}" ${'checked' if g['Status'] == 'identified' else 'disabled'} /></td>
-                        <td>${g['Folder'] | h}${' [' + (g['Volume'] | h) + ']' if g['Volume'] else ''}</td>
+                        <td>${(g['Folder'] + (' [' + g['Volume'] + ']' if g['Volume'] else '')) | h}</td>
                         <td>${g['Files'] | h}</td>
                         <td>
-                            %if top.get('image'):
-                            <img class="og-cover" loading="lazy" src="${top.get('image') | h}" />
+                            %if top.get('comicimage'):
+                            <img class="og-cover" loading="lazy" src="${top.get('comicimage') | h}" />
                             %endif
                             <a href="#" class="og-action" data-group="${g['GroupID'] | h}">${top.get('name') | h} (${top.get('comicyear') | h})</a>
                         </td>
@@ -68,7 +68,7 @@
 %for g in groups.get('review', []):
 <% top = g['Candidates'][0] if g['Candidates'] else {} %>
                     <tr>
-                        <td><a href="#" class="og-action" data-group="${g['GroupID'] | h}">${g['Folder'] | h}${' [' + (g['Volume'] | h) + ']' if g['Volume'] else ''}</a></td>
+                        <td><a href="#" class="og-action" data-group="${g['GroupID'] | h}">${(g['Folder'] + (' [' + g['Volume'] + ']' if g['Volume'] else '')) | h}</a></td>
                         <td>${g['Files'] | h}</td>
                         <td>${(top.get('name') or 'no ComicVine match') | h} ${('(%s)' % top.get('comicyear')) if top.get('comicyear') else '' | h}</td>
                         <td>${', '.join(g['Failed']) | h}</td>
@@ -85,7 +85,7 @@
                 <thead><tr><th>Folder</th><th>Files</th></tr></thead>
                 <tbody>
 %for g in groups.get('mixed', []):
-                    <tr><td><a href="orphans?search=${g['Folder'] | u}">${g['Folder'] | h}${' [' + (g['Volume'] | h) + ']' if g['Volume'] else ''}</a></td><td>${g['Files'] | h}</td></tr>
+                    <tr><td><a href="orphans?search=${g['Folder'] | u}">${(g['Folder'] + (' [' + g['Volume'] + ']' if g['Volume'] else '')) | h}</a></td><td>${g['Files'] | h}</td></tr>
 %endfor
                 </tbody>
             </table>
@@ -140,10 +140,20 @@
                 return $('<div/>').text(text === null || text === undefined ? '' : text).html();
         }
 
+        var jobRunning = false;
+        var pollTimer = null;
+        var stickyMessage = '';
+
+        function setSticky(text){
+                stickyMessage = text || '';
+                $('#orphan_job').text(stickyMessage);
+        }
+
         function showJob(job){
                 if (!job) return;
                 var p = job.progress || {};
                 var html = '';
+                jobRunning = !!job.running;
                 if (job.running){
                         html = '<strong>' + esc(job.kind) + '</strong> running';
                         if (p.total) html += ' - ' + esc(p.done) + ' / ' + esc(p.total);
@@ -151,40 +161,59 @@
                         if (p.auto !== undefined) html += ' (auto ' + esc(p.auto) + ', review ' + esc(p.review) + ', mixed ' + esc(p.mixed) + ')';
                         if (p.moved !== undefined) html += ' (moved ' + esc(p.moved) + ', parked ' + esc(p.parked) + ', failed ' + esc(p.failed) + ')';
                         if (job.stopping) html += ' - stopping';
-                        $('.og-action').not('#btn_stop').prop('disabled', true).addClass('disabled');
+                        $('.og-action, .og-modal-action').prop('disabled', true).addClass('disabled');
                         $('#btn_stop').prop('disabled', false).removeClass('disabled');
                 } else {
-                        $('.og-action').prop('disabled', false).removeClass('disabled');
+                        $('.og-action, .og-modal-action').prop('disabled', false).removeClass('disabled');
                         $('#btn_stop').prop('disabled', true).addClass('disabled');
                         if (job.message){
                                 html = esc(job.message);
+                        } else {
+                                html = esc(stickyMessage);
                         }
                 }
                 $('#orphan_job').html(html);
         }
 
         var wasRunning = ${'true' if job['running'] else 'false'};
+        function schedulePoll(ms){
+                if (pollTimer !== null) clearTimeout(pollTimer);
+                pollTimer = setTimeout(poll, ms);
+        }
+
         function poll(){
+                pollTimer = null;
                 $.getJSON('orphanGroupsStatus', function(job){
                         showJob(job);
                         if (wasRunning && !job.running){ location.reload(); return; }
                         wasRunning = job.running;
-                        setTimeout(poll, job.running ? 3000 : 15000);
+                        schedulePoll(job.running ? 3000 : 15000);
                 }).fail(function(){
-                        $('#orphan_job').html('Request failed - see the Mylar log.');
+                        setSticky('Request failed - see the Mylar log.');
+                        schedulePoll(15000);
                 });
         }
 
         function startJob(endpoint, params){
+                setSticky('');
                 $.getJSON(endpoint, params || {}, function(data){
                         if (data.status === 'success'){
                                 wasRunning = true;
-                                setTimeout(poll, 1000);
+                                schedulePoll(1000);
                         } else {
-                                $('#orphan_job').html(esc(data.message || 'Job failed'));
+                                setSticky(data.message || 'Job failed');
                         }
                 }).fail(function(){
-                        $('#orphan_job').html('Request failed - see the Mylar log.');
+                        setSticky('Request failed - see the Mylar log.');
+                });
+        }
+
+        function stopJob(){
+                $.getJSON('orphanGroupsStop', {}, function(data){
+                        setSticky(data.message || 'Stopping.');
+                        schedulePoll(1000);
+                }).fail(function(){
+                        setSticky('Request failed - see the Mylar log.');
                 });
         }
 
@@ -197,30 +226,46 @@
         function approveAuto(){
                 if (!confirm('Approve the selected auto groups?')) return;
                 var excluded = $('.auto_include:not(:checked):not(:disabled)').map(function(){ return this.value; }).get();
-                startJob('orphanGroupsApprove', {exclude: excluded.join(',')});
+                setSticky('');
+                $.getJSON('orphanGroupsApprove', {exclude: excluded.join(',')}, function(data){
+                        setSticky(data.message || 'Approve finished.');
+                        if (data.status === 'success') setTimeout(function(){ location.reload(); }, 1200);
+                }).fail(function(){
+                        setSticky('Request failed - see the Mylar log.');
+                });
         }
 
         function openGroup(groupid){
                 $.getJSON('orphanGroup', {GroupID: groupid}, function(g){
-                        if (g.status !== 'success'){ alert(esc(g.message)); return; }
+                        if (g.status !== 'success'){ alert(g.message); return; }
                         var html = '<p><strong>' + esc(g.Folder) + '</strong> - ' + esc(g.Files) + ' files, reads as <em>' +
                                    esc(g.Evidence.series) + '</em>' + (g.Evidence.year ? ' (' + esc(g.Evidence.year) + ')' : '') + '</p>';
                         if (g.Failed.length) html += '<p>Not auto because: ' + esc(g.Failed.join(', ')) + '</p>';
                         html += '<div style="float:left;margin-right:14px;text-align:center;"><div id="group_own_cover"></div><small>inside the files</small></div>';
                         html += '<table class="orphan_panel"><tbody>';
                         $.each(g.Candidates, function(i, c){
-                                html += '<tr><td>' + (c.comicimage ? '<img class="orphan_cover" src="' + esc(c.comicimage) + '"/>' : '') + '</td>' +
-                                        '<td><strong>' + esc(c.name) + '</strong> (' + esc(c.comicyear) + ')<br/>' + esc(c.publisher) +
+                                html += '<tr><td>' + (c.comicimage ? '<img class="orphan_cover"/>' : '') + '</td>' +
+                                        '<td><strong class="c_name"></strong> (' + esc(c.comicyear) + ')<br/>' + esc(c.publisher) +
                                         '<br/>' + esc(c.issues) + ' issues - score ' + esc(c.score) +
-                                        '<br/><button type="button" class="og-modal-action" data-action="pick" data-group="' + esc(g.GroupID) + '" data-comic="' + esc(c.comicid) + '">This one</button></td></tr>';
+                                        '<br/><button type="button" class="og-modal-action" data-action="pick">This one</button></td></tr>';
                         });
                         html += '</tbody></table>';
-                        html += '<p style="clear:both;"><button type="button" class="og-modal-action" data-action="skip" data-group="' + esc(g.GroupID) + '">Skip this group</button></p>';
-                        $('#orphan_group_body').html(html);
+                        html += '<p style="clear:both;"><button type="button" class="og-modal-action" data-action="skip">Skip this group</button></p>';
+                        var $body = $('#orphan_group_body').html(html);
+                        // attribute values are set through .attr() so quotes in data cannot break out
+                        $body.find('tbody tr').each(function(i){
+                                var c = g.Candidates[i];
+                                if (c.comicimage) $(this).find('img.orphan_cover').attr('src', c.comicimage);
+                                $(this).find('.c_name').text(c.name === null || c.name === undefined ? '' : c.name);
+                                $(this).find('button.og-modal-action').attr('data-group', g.GroupID).attr('data-comic', c.comicid);
+                        });
+                        $body.find('button.og-modal-action[data-action="skip"]').attr('data-group', g.GroupID);
+                        if (jobRunning) $body.find('.og-modal-action').prop('disabled', true).addClass('disabled');
                         if (g.FirstOrphanID){
                                 $.getJSON('orphanCover', {OrphanID: g.FirstOrphanID}, function(data){
-                                        $('#group_own_cover').html(data.image ? '<img class="orphan_cover" src="' + esc(data.image) + '"/>'
+                                        $('#group_own_cover').html(data.image ? '<img class="orphan_cover"/>'
                                                                               : '<small>' + esc(data.error || 'No cover') + '</small>');
+                                        if (data.image) $('#group_own_cover img').attr('src', data.image);
                                 }).fail(function(){
                                         $('#group_own_cover').html('<small>Error loading cover</small>');
                                 });
@@ -235,6 +280,7 @@
                 updateApproveText();
                 $('.auto_include').on('change', updateApproveText);
                 $('#btn_approve').on('click', approveAuto);
+                $('#btn_stop').on('click', stopJob);
 
                 $(document).on('click', 'a.og-action[data-group]', function(e){
                         e.preventDefault();
@@ -243,9 +289,9 @@
                         openGroup(groupid);
                 });
 
-                $(document).on('click', 'a.og-action[data-action]', function(e){
+                $(document).on('click', '.og-action[data-action]', function(e){
                         e.preventDefault();
-                        if ($(this).hasClass('disabled')) return;
+                        if ($(this).hasClass('disabled') || $(this).prop('disabled')) return;
                         var action = $(this).data('action');
                         var msg = $(this).data('confirm');
                         if (msg && !confirm(msg)) return;
@@ -256,13 +302,14 @@
                 });
 
                 $(document).on('click', 'button.og-modal-action', function(){
+                        if (jobRunning || $(this).prop('disabled')) return;
                         var action = $(this).data('action');
                         var groupid = $(this).data('group');
                         if (action === 'pick'){
                                 var comicid = $(this).data('comic');
                                 $.getJSON('orphanGroupPick', {GroupID: groupid, ComicID: comicid}, function(data){
                                         if (data.status === 'success') location.reload();
-                                        else alert(esc(data.message));
+                                        else alert(data.message);
                                 }).fail(function(){
                                         alert('Request failed - see the Mylar log.');
                                 });
