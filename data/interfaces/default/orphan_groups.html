@@ -32,9 +32,9 @@
                 <strong>Approved, not yet filed</strong> ${approved | h}
             </p>
             <p>
-                <button type="button" class="og-action" id="btn_approve">Approve <span id="auto_count">${counts['auto'][0] | h}</span> auto groups</button>
-                <button type="button" class="og-action" data-action="orphanGroupsFile" data-confirm="Move every approved group into your library? A database backup is taken first, and each batch can be reverted.">File approved groups</button>
-                <button type="button" id="btn_stop">Stop</button>
+                <input type="button" class="og-action" id="btn_approve" value="Approve ${counts['auto'][0] | h} auto groups" />
+                <input type="button" class="og-action" data-action="orphanGroupsFile" data-confirm="Move every approved group into your library? A database backup is taken first, and each batch can be reverted." value="File approved groups" />
+                <input type="button" id="btn_stop" value="Stop" disabled="disabled" />
             </p>
 
             <h2>Auto</h2>
@@ -131,6 +131,7 @@
         .orphan_cover { max-height:190px; max-width:130px; border:1px solid #444; }
         .og-cover { max-height:40px; max-width:40px; border:1px solid #444; margin-right:4px; vertical-align:middle; }
         a.disabled { opacity:0.5; cursor:not-allowed; pointer-events:none; }
+        input[type="button"]:disabled { opacity:0.5; cursor:not-allowed; }
         </style>
 </%def>
 
@@ -220,7 +221,7 @@
         function updateApproveText(){
                 var count = $('.auto_include:not(:disabled):not(:checked)').length;
                 var total = $('.auto_include:not(:disabled)').length;
-                $('#auto_count').text(total - count);
+                $('#btn_approve').val('Approve ' + (total - count) + ' auto groups');
         }
 
         function approveAuto(){
@@ -247,19 +248,19 @@
                                 html += '<tr><td>' + (c.comicimage ? '<img class="orphan_cover"/>' : '') + '</td>' +
                                         '<td><strong class="c_name"></strong> (' + esc(c.comicyear) + ')<br/>' + esc(c.publisher) +
                                         '<br/>' + esc(c.issues) + ' issues - score ' + esc(c.score) +
-                                        '<br/><button type="button" class="og-modal-action" data-action="pick">This one</button></td></tr>';
+                                        '<br/><input type="button" class="og-modal-action" data-action="pick" value="This one" /></td></tr>';
                         });
                         html += '</tbody></table>';
-                        html += '<p style="clear:both;"><button type="button" class="og-modal-action" data-action="skip">Skip this group</button></p>';
+                        html += '<p style="clear:both;"><input type="button" class="og-modal-action" data-action="skip" value="Skip this group" /></p>';
                         var $body = $('#orphan_group_body').html(html);
                         // attribute values are set through .attr() so quotes in data cannot break out
                         $body.find('tbody tr').each(function(i){
                                 var c = g.Candidates[i];
                                 if (c.comicimage) $(this).find('img.orphan_cover').attr('src', c.comicimage);
                                 $(this).find('.c_name').text(c.name === null || c.name === undefined ? '' : c.name);
-                                $(this).find('button.og-modal-action').attr('data-group', g.GroupID).attr('data-comic', c.comicid);
+                                $(this).find('.og-modal-action').attr('data-group', g.GroupID).attr('data-comic', c.comicid);
                         });
-                        $body.find('button.og-modal-action[data-action="skip"]').attr('data-group', g.GroupID);
+                        $body.find('.og-modal-action[data-action="skip"]').attr('data-group', g.GroupID);
                         if (jobRunning) $body.find('.og-modal-action').prop('disabled', true).addClass('disabled');
                         if (g.FirstOrphanID){
                                 $.getJSON('orphanCover', {OrphanID: g.FirstOrphanID}, function(data){
@@ -301,7 +302,7 @@
                         startJob(action, params);
                 });
 
-                $(document).on('click', 'button.og-modal-action', function(){
+                $(document).on('click', 'input.og-modal-action', function(){
                         if (jobRunning || $(this).prop('disabled')) return;
                         var action = $(this).data('action');
                         var groupid = $(this).data('group');
