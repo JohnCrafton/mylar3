@@ -45,7 +45,7 @@
 <% top = g['Candidates'][0] if g['Candidates'] else {} %>
 %if top:
                     <tr>
-                        <td><input type="checkbox" class="auto_include" value="${g['GroupID']}" ${'checked' if g['Status'] == 'identified' else 'disabled'} /></td>
+                        <td><input type="checkbox" class="auto_include" value="${g['GroupID'] | h}" ${'checked' if g['Status'] == 'identified' else 'disabled'} /></td>
                         <td>${g['Folder'] | h}${' [' + (g['Volume'] | h) + ']' if g['Volume'] else ''}</td>
                         <td>${g['Files'] | h}</td>
                         <td>
