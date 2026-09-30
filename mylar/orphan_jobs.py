@@ -246,7 +246,7 @@ def _series(db, comicid):
     return comic
 
 
-def wait_for_series(db, comicid, add, sleep, timeout, poll=5):
+def wait_for_series(db, comicid, add, sleep, timeout, poll=5, stop=None):
     """The series ready to file into, adding it first if Mylar lacks it.
 
     Adding is queued inside Mylar, so this waits for the folder and issue list
@@ -256,6 +256,8 @@ def wait_for_series(db, comicid, add, sleep, timeout, poll=5):
         add(comicid)
     waited = 0
     while True:
+        if stop is not None and stop():
+            return None
         comic = _series(db, comicid)
         if comic is not None:
             return comic

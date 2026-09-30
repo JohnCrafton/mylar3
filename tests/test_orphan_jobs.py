@@ -467,6 +467,21 @@ def test_wait_for_series_gives_up_after_timeout():
     assert oj.wait_for_series(db, '7', lambda c: None, lambda s: None, timeout=10, poll=5) is None
 
 
+@pytest.mark.unit
+def test_wait_for_series_honours_stop():
+    db = FakeDB()
+    slept, calls = [], []
+
+    def stop():
+        calls.append(1)
+        return len(calls) >= 2
+
+    result = oj.wait_for_series(db, '7', lambda c: None, slept.append, timeout=900, stop=stop)
+
+    assert result is None
+    assert len(slept) <= 1
+
+
 @pytest.mark.integration
 def test_resume_refuses_reverted_batch(tmp_path):
     db, lib, folder = _library(tmp_path)
