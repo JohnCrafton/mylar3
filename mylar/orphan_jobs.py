@@ -276,13 +276,14 @@ def _finish(db, batch_id, comic, deps, skipped, started):
     for row in moved:
         if row['Was'] == 'filed':
             continue          # recorded on an earlier pass of this batch
-        db.action("UPDATE orphans SET Status='filed', IssueID=? WHERE OrphanID=?",
-                  [row['IssueID'], row['OrphanID']])
         try:
             deps.record_history(row, comic, issues.get(row['IssueID'], {}),
                                 row['Destination'])
         except Exception as e:
             deps.log('[ORPHANS] Could not record history for %s: %s' % (row['FileName'], e))
+            continue
+        db.action("UPDATE orphans SET Status='filed', IssueID=? WHERE OrphanID=?",
+                  [row['IssueID'], row['OrphanID']])
     if parked:
         db.action("UPDATE orphans SET Status='parked' WHERE OrphanID=?",
                   [(r['OrphanID'],) for r in parked], executemany=True)
@@ -350,6 +351,10 @@ def resume_batch(db, batch_id, deps):
     rows = db.select('SELECT ComicID FROM orphan_moves WHERE BatchID=? LIMIT 1', [batch_id])
     if not rows:
         return BatchResult(batch_id, None, 0, 0, 0, 0, False, 'Unknown batch')
+    counts = moves.batch_counts(db, batch_id)
+    if not (counts.get('planned') or counts.get('failed') or counts.get('moving')):
+        return BatchResult(batch_id, rows[0]['ComicID'], 0, 0, 0, 0, False,
+                           'Nothing left to file in this batch.')
     comic = deps.ensure_series(rows[0]['ComicID'])
     if comic is None:
         return BatchResult(batch_id, rows[0]['ComicID'], 0, 0, 0, 0, False,
@@ -387,16 +392,20 @@ def run_file_job(db, deps, run_id):
 
 def revert_batch(db, batch_id, deps):
     """Undo a batch and put its orphans and groups back as they were."""
+    before = dict((r['Seq'], r['OrphanID']) for r in db.select(
+        "SELECT Seq, OrphanID FROM orphan_moves WHERE BatchID=? AND Status='done'"
+        " AND Kind IN ('move', 'park')", [batch_id]))
     result = moves.revert(db, batch_id, deps.now)
-    back = [(r['OrphanID'],) for r in db.select(
-        "SELECT OrphanID FROM orphan_moves WHERE BatchID=? AND Status='reverted'"
-        " AND Kind IN ('move', 'park')", [batch_id])]
+    now_reverted = set(r['Seq'] for r in db.select(
+        "SELECT Seq FROM orphan_moves WHERE BatchID=? AND Status='reverted'", [batch_id]))
+    back = [(before[s],) for s in before if s in now_reverted]
     if back:
         db.action("UPDATE orphans SET Status='identified', IssueID=NULL WHERE OrphanID=?",
                   back, executemany=True)
-    db.action("UPDATE orphan_groups SET Status='reverted' WHERE GroupID IN"
+    group_status = 'partial' if result.skipped else 'reverted'
+    db.action("UPDATE orphan_groups SET Status=? WHERE GroupID IN"
               " (SELECT DISTINCT GroupID FROM orphan_moves WHERE BatchID=?"
-              " AND GroupID IS NOT NULL)", [batch_id])
+              " AND GroupID IS NOT NULL)", [group_status, batch_id])
     rows = db.select('SELECT ComicID FROM orphan_moves WHERE BatchID=? LIMIT 1', [batch_id])
     if rows and rows[0]['ComicID']:
         deps.rescan(rows[0]['ComicID'])

@@ -412,7 +412,8 @@ def test_revert_run_restores_files_and_rows(tmp_path):
     assert [r.reverted for r in results] == [3]
     assert sorted(os.listdir(folder)) == ['Fables 001 (1).cbz', 'Fables 001.cbz',
                                           'Fables 002.cbz', 'Fables extra.cbz']
-    assert set(_orphan_status(db).values()) <= {'identified', 'new'}
+    assert _orphan_status(db) == {'Fables 001.cbz': 'identified', 'Fables 001 (1).cbz': 'identified',
+                                  'Fables 002.cbz': 'identified', 'Fables extra.cbz': 'new'}
     assert db.select('SELECT Status FROM orphan_groups')[0]['Status'] == 'reverted'
     assert fake.rescans == ['25543', '25543']
 
@@ -443,3 +444,58 @@ def test_wait_for_series_adds_once_then_waits_until_ready():
 def test_wait_for_series_gives_up_after_timeout():
     db = FakeDB()
     assert oj.wait_for_series(db, '7', lambda c: None, lambda s: None, timeout=10, poll=5) is None
+
+
+@pytest.mark.integration
+def test_resume_refuses_reverted_batch(tmp_path):
+    db, lib, folder = _library(tmp_path)
+    fake = _Deps(db, lib)
+    results = oj.run_file_job(db, fake.deps(), 'run1')
+    batch_id = results[0].batch_id
+
+    oj.revert_run(db, 'run1', fake.deps())
+
+    result = oj.resume_batch(db, batch_id, fake.deps())
+    assert result.error == 'Nothing left to file in this batch.'
+    assert db.select('SELECT Status FROM orphan_groups')[0]['Status'] == 'reverted'
+    assert sorted(os.listdir(folder)) == ['Fables 001 (1).cbz', 'Fables 001.cbz',
+                                          'Fables 002.cbz', 'Fables extra.cbz']
+
+
+@pytest.mark.integration
+def test_revert_twice_leaves_refiled_orphans_alone(tmp_path):
+    db, lib, folder = _library(tmp_path)
+    fake = _Deps(db, lib)
+    results = oj.run_file_job(db, fake.deps(), 'run1')
+    batch_id = results[0].batch_id
+
+    oj.revert_batch(db, batch_id, fake.deps())
+    # Simulate a later batch refiling one orphan
+    db.action("UPDATE orphans SET Status='filed', IssueID='i1' WHERE OrphanID='Fables 001.cbz'")
+
+    result = oj.revert_batch(db, batch_id, fake.deps())
+    # The orphan that was refiled should stay filed
+    assert db.select('SELECT Status FROM orphans WHERE OrphanID=?',
+                     ['Fables 001.cbz'])[0]['Status'] == 'filed'
+
+
+@pytest.mark.integration
+def test_revert_with_occupied_source_marks_group_partial(tmp_path):
+    db, lib, folder = _library(tmp_path)
+    fake = _Deps(db, lib)
+    results = oj.run_file_job(db, fake.deps(), 'run1')
+    batch_id = results[0].batch_id
+
+    # Create a file at one of the source paths to block revert
+    done_row = db.select(
+        "SELECT Source FROM orphan_moves WHERE BatchID=? AND Status='done' AND Kind='move' LIMIT 1",
+        [batch_id])[0]
+    _write(done_row['Source'], 10)
+
+    result = oj.revert_batch(db, batch_id, fake.deps())
+    assert result.skipped  # Should have skipped at least one
+    assert db.select('SELECT Status FROM orphan_groups WHERE GroupID IN'
+                     ' (SELECT DISTINCT GroupID FROM orphan_moves WHERE BatchID=?)',
+                     [batch_id])[0]['Status'] == 'partial'
+
+
