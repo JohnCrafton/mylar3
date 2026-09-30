@@ -1,0 +1,215 @@
+<%inherit file="base.html"/>
+<%!
+	import mylar
+%>
+
+<%def name="headerIncludes()">
+	<div id="subhead_container">
+		<div id="subhead_menu">
+			<a id="menu_link_scan" href="#" onclick="startJob('orphanGroupsIdentify');return false;">Identify groups</a>
+			<a id="menu_link_edit" href="orphans">Orphans (per file)</a>
+		</div>
+	</div>
+</%def>
+
+<%def name="body()">
+        <input type="hidden" id="page_name" value="orphan_groups" />
+	<div id="paddingheader">
+		<h1 class="clearfix">Orphan Groups</h1>
+	</div>
+
+        <div class="table_wrapper">
+            <div id="orphan_job" style="margin:6px 0 12px 0;"></div>
+<%
+    counts = dict((t, (len(groups.get(t, [])), sum(g['Files'] for g in groups.get(t, []))))
+                  for t in ('auto', 'review', 'mixed'))
+    approved = sum(1 for t in groups.values() for g in t if g['Status'] == 'approved')
+%>
+            <p>
+                <strong>Auto</strong> ${counts['auto'][0]} groups / ${counts['auto'][1]} files &nbsp;&middot;&nbsp;
+                <strong>Review</strong> ${counts['review'][0]} / ${counts['review'][1]} &nbsp;&middot;&nbsp;
+                <strong>Mixed</strong> ${counts['mixed'][0]} / ${counts['mixed'][1]} &nbsp;&middot;&nbsp;
+                <strong>Approved, not yet filed</strong> ${approved}
+            </p>
+            <p>
+                <button type="button" onclick="approveAuto();">Approve auto groups (except unticked)</button>
+                <button type="button" onclick="startJob('orphanGroupsFile');">File approved groups</button>
+                <button type="button" onclick="startJob('orphanGroupsStop');">Stop</button>
+            </p>
+
+            <h2>Auto</h2>
+            <table class="orphan_panel" style="width:100%">
+                <thead><tr><th>Include</th><th>Folder</th><th>Files</th><th>Series</th><th>Status</th></tr></thead>
+                <tbody>
+%for g in groups.get('auto', []):
+<% top = g['Candidates'][0] if g['Candidates'] else {} %>
+                    <tr>
+                        <td><input type="checkbox" class="auto_include" value="${g['GroupID']}" ${'checked' if g['Status'] == 'identified' else 'disabled'} /></td>
+                        <td>${g['Folder']}${' [' + g['Volume'] + ']' if g['Volume'] else ''}</td>
+                        <td>${g['Files']}</td>
+                        <td><a href="#" onclick="openGroup('${g['GroupID']}');return false;">${top.get('name')} (${top.get('comicyear')})</a></td>
+                        <td>${g['Status']}</td>
+                    </tr>
+%endfor
+                </tbody>
+            </table>
+
+            <h2>Review</h2>
+            <table class="orphan_panel" style="width:100%">
+                <thead><tr><th>Folder</th><th>Files</th><th>Best match</th><th>Why not auto</th><th>Status</th></tr></thead>
+                <tbody>
+%for g in groups.get('review', []):
+<% top = g['Candidates'][0] if g['Candidates'] else {} %>
+                    <tr>
+                        <td><a href="#" onclick="openGroup('${g['GroupID']}');return false;">${g['Folder']}${' [' + g['Volume'] + ']' if g['Volume'] else ''}</a></td>
+                        <td>${g['Files']}</td>
+                        <td>${(top.get('name') or 'no ComicVine match')} ${('(%s)' % top.get('comicyear')) if top.get('comicyear') else ''}</td>
+                        <td>${', '.join(g['Failed'])}</td>
+                        <td>${g['Status']}</td>
+                    </tr>
+%endfor
+                </tbody>
+            </table>
+
+            <h2>Mixed</h2>
+            <p>Folders without one series in them - reading orders, collections. File these from the
+               <a href="orphans">per-file workbench</a>.</p>
+            <table class="orphan_panel" style="width:100%">
+                <thead><tr><th>Folder</th><th>Files</th></tr></thead>
+                <tbody>
+%for g in groups.get('mixed', []):
+                    <tr><td>${g['Folder']}${' [' + g['Volume'] + ']' if g['Volume'] else ''}</td><td>${g['Files']}</td></tr>
+%endfor
+                </tbody>
+            </table>
+
+            <h2>Batches</h2>
+            <table class="orphan_panel" style="width:100%">
+                <thead><tr><th>When</th><th>Batch</th><th>Series</th><th>Done</th><th>Failed</th><th>Planned</th><th>Reverted</th><th></th></tr></thead>
+                <tbody>
+%for b in batches:
+                    <tr>
+                        <td>${b['When']}</td><td>${b['BatchID']}</td>
+                        <td><a href="comicDetails?ComicID=${b['ComicID']}">${b['ComicID']}</a></td>
+                        <td>${b['done']}</td><td>${b['failed']}</td><td>${b['planned']}</td><td>${b['reverted']}</td>
+                        <td>
+%if b['failed'] or b['planned']:
+                            <a href="#" onclick="startJob('orphanBatchResume', {BatchID: '${b['BatchID']}'});return false;">Resume</a>
+%endif
+%if b['done']:
+                            <a href="#" onclick="if(confirm('Put every file in this batch back where it was?')) startJob('orphanBatchRevert', {BatchID: '${b['BatchID']}'});return false;">Revert</a>
+                            &middot; <a href="#" onclick="if(confirm('Revert every batch of run ${b['RunID']}?')) startJob('orphanRunRevert', {RunID: '${b['RunID']}'});return false;">Revert run</a>
+%endif
+                        </td>
+                    </tr>
+%endfor
+                </tbody>
+            </table>
+        </div>
+
+        <div id="orphan_group_dialog" title="Group" style="display:none" class="configtable">
+            <div id="orphan_group_body"></div>
+        </div>
+</%def>
+
+<%def name="headIncludes()">
+        <style>
+        /* no class="display" on these tables - see the note in orphans.html */
+        table.orphan_panel { border-collapse: collapse; margin-bottom: 18px; }
+        table.orphan_panel th, table.orphan_panel td { padding: 4px 8px; vertical-align: top; }
+        table.orphan_panel thead th { border-bottom: 1px solid #555; text-align: left; }
+        table.orphan_panel tbody tr:nth-child(even) { background: rgba(127,127,127,.07); }
+        .orphan_cover { max-height:190px; max-width:130px; border:1px solid #444; }
+        </style>
+</%def>
+
+<%def name="javascriptIncludes()">
+        <script>
+        function esc(text){
+                return $('<div/>').text(text === null || text === undefined ? '' : text).html();
+        }
+
+        function showJob(job){
+                if (!job) return;
+                var p = job.progress || {};
+                var html = '';
+                if (job.running){
+                        html = '<strong>' + esc(job.kind) + '</strong> running';
+                        if (p.total) html += ' - ' + esc(p.done) + ' / ' + esc(p.total);
+                        if (p.folder) html += ' - ' + esc(p.folder);
+                        if (p.auto !== undefined) html += ' (auto ' + esc(p.auto) + ', review ' + esc(p.review) + ', mixed ' + esc(p.mixed) + ')';
+                        if (p.moved !== undefined) html += ' (moved ' + esc(p.moved) + ', parked ' + esc(p.parked) + ', failed ' + esc(p.failed) + ')';
+                        if (job.stopping) html += ' - stopping';
+                } else if (job.message){
+                        html = esc(job.message);
+                }
+                $('#orphan_job').html(html);
+        }
+
+        var wasRunning = ${'true' if job['running'] else 'false'};
+        function poll(){
+                $.getJSON('orphanGroupsStatus', function(job){
+                        showJob(job);
+                        if (wasRunning && !job.running){ location.reload(); return; }
+                        wasRunning = job.running;
+                        setTimeout(poll, job.running ? 3000 : 15000);
+                });
+        }
+
+        function startJob(endpoint, params){
+                $.getJSON(endpoint, params || {}, function(data){
+                        $('#orphan_job').html(esc(data.message || data.status));
+                        wasRunning = true;
+                        setTimeout(poll, 1000);
+                });
+        }
+
+        function approveAuto(){
+                var excluded = $('.auto_include:not(:checked):not(:disabled)').map(function(){ return this.value; }).get();
+                $.getJSON('orphanGroupsApprove', {exclude: excluded.join(',')}, function(data){
+                        alert(data.message);
+                        location.reload();
+                });
+        }
+
+        function openGroup(groupid){
+                $.getJSON('orphanGroup', {GroupID: groupid}, function(g){
+                        if (g.status !== 'success'){ alert(g.message); return; }
+                        var html = '<p><strong>' + esc(g.Folder) + '</strong> - ' + esc(g.Files) + ' files, reads as <em>' +
+                                   esc(g.Evidence.series) + '</em>' + (g.Evidence.year ? ' (' + esc(g.Evidence.year) + ')' : '') + '</p>';
+                        if (g.Failed.length) html += '<p>Not auto because: ' + esc(g.Failed.join(', ')) + '</p>';
+                        html += '<div style="float:left;margin-right:14px;text-align:center;"><div id="group_own_cover"></div><small>inside the files</small></div>';
+                        html += '<table class="orphan_panel"><tbody>';
+                        $.each(g.Candidates, function(i, c){
+                                html += '<tr><td>' + (c.comicimage ? '<img class="orphan_cover" src="' + esc(c.comicimage) + '"/>' : '') + '</td>' +
+                                        '<td><strong>' + esc(c.name) + '</strong> (' + esc(c.comicyear) + ')<br/>' + esc(c.publisher) +
+                                        '<br/>' + esc(c.issues) + ' issues - score ' + esc(c.score) +
+                                        '<br/><button type="button" onclick="pick(\'' + esc(g.GroupID) + '\',\'' + esc(c.comicid) + '\')">This one</button></td></tr>';
+                        });
+                        html += '</tbody></table>';
+                        html += '<p style="clear:both;"><button type="button" onclick="skipGroup(\'' + esc(g.GroupID) + '\')">Skip this group</button></p>';
+                        $('#orphan_group_body').html(html);
+                        if (g.FirstOrphanID){
+                                $.getJSON('orphanCover', {OrphanID: g.FirstOrphanID}, function(data){
+                                        $('#group_own_cover').html(data.image ? '<img class="orphan_cover" src="' + esc(data.image) + '"/>'
+                                                                              : '<small>' + esc(data.error || 'No cover') + '</small>');
+                                });
+                        }
+                        $('#orphan_group_dialog').dialog({width: 720, modal: true});
+                });
+        }
+
+        function pick(groupid, comicid){
+                $.getJSON('orphanGroupPick', {GroupID: groupid, ComicID: comicid}, function(data){
+                        alert(data.message);
+                        location.reload();
+                });
+        }
+
+        function skipGroup(groupid){
+                $.getJSON('orphanGroupSkip', {GroupID: groupid}, function(){ location.reload(); });
+        }
+
+        $(document).ready(function(){ poll(); });
+        </script>
+</%def>
