@@ -217,10 +217,14 @@ def park_destination(source, library_root):
 
 
 def tracked_path(issue, series_dir):
-    """The file Mylar records for an issue, normalised; None if it has none."""
+    """The file Mylar records for an issue, links resolved; None if it has none.
+
+    Resolved so a series folder reached through a symlink or a second mount
+    point still matches the path the orphan scan recorded.
+    """
     if not issue.get('Location'):
         return None
-    return os.path.normpath(os.path.join(series_dir, issue['Location']))
+    return os.path.realpath(os.path.join(series_dir, issue['Location']))
 
 
 def plan_series(files, issues, has_file, destination_dir, name_for, library_root):
@@ -239,7 +243,7 @@ def plan_series(files, issues, has_file, destination_dir, name_for, library_root
     skipped = []
     for row in files:
         issue = orphans.match_issue(issues, row.get('ParsedIssue'))
-        if issue is None or os.path.normpath(row['FilePath']) == tracked_path(
+        if issue is None or os.path.realpath(row['FilePath']) == tracked_path(
                 issue, destination_dir):
             skipped.append(row['OrphanID'])
             continue

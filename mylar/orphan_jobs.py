@@ -354,14 +354,14 @@ def file_series(db, comicid, deps, run_id):
     # already filed, and must not be parked or moved as a duplicate of itself
     tracked = dict((batches.tracked_path(i, location), i['IssueID'])
                    for i in comic['issues'] if i.get('Location'))
-    already = [(tracked[os.path.normpath(f['FilePath'])], f['OrphanID']) for f in files
-               if os.path.normpath(f['FilePath']) in tracked]
+    already = [(tracked[os.path.realpath(f['FilePath'])], f['OrphanID']) for f in files
+               if os.path.realpath(f['FilePath']) in tracked]
     if already:
         db.action("UPDATE orphans SET Status='filed', IssueID=? WHERE OrphanID=?",
                   already, executemany=True)
         deps.log('[ORPHANS] Series %s: %d orphans are the files Mylar already has;'
                  ' marked filed' % (comicid, len(already)))
-        files = [f for f in files if os.path.normpath(f['FilePath']) not in tracked]
+        files = [f for f in files if os.path.realpath(f['FilePath']) not in tracked]
 
     def has_file(issue):
         # a recorded Location is not proof: it can outlive the file it names

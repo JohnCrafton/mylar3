@@ -405,6 +405,17 @@ def test_execute_counts_a_keeper_already_at_its_filed_path_as_done(tmp_path):
 
 
 @pytest.mark.integration
+def test_execute_fails_a_same_path_keeper_that_is_not_on_disk(tmp_path):
+    # the same-path shortcut must not mark a missing file as filed
+    a = str(tmp_path / 'Fables (2002)' / 'Fables 001 (2002).cbz')
+    db = FakeDB()
+    batch = _plan(db, [ob.Move('move', 'o1', a, a, 'i1')])
+
+    assert om.execute(db, batch, _now) == om.MoveResult(0, 1, False)
+    assert _statuses(db) == [('move', 'failed')]
+
+
+@pytest.mark.integration
 def test_revert_of_a_keeper_already_at_its_filed_path_leaves_it_and_is_not_skipped(tmp_path):
     a = _file(str(tmp_path / 'Fables (2002)' / 'Fables 001 (2002).cbz'), b'A')
     db = FakeDB()

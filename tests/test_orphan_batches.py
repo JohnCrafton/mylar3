@@ -254,6 +254,24 @@ def test_plan_series_never_parks_or_moves_the_file_mylar_tracks():
     assert plan.skipped == ('F 001 (2002).cbz',)
 
 
+
+@pytest.mark.integration
+def test_plan_series_knows_the_tracked_file_through_a_symlinked_library(tmp_path):
+    # Mylar's ComicLocation may reach the library through a link the scan did
+    # not use; the tracked file must still be recognised, not parked
+    real = tmp_path / 'lib'
+    (real / 'F (2002)').mkdir(parents=True)
+    (real / 'F (2002)' / 'F 001 (2002).cbz').write_bytes(b'A')
+    alias = tmp_path / 'alias'
+    alias.symlink_to(real)
+    tracked = orphan(str(real / 'F (2002)' / 'F 001 (2002).cbz'), ParsedIssue='001',
+                     FileSize=50)
+    plan = ob.plan_series([tracked], _issues(1, n1='F 001 (2002).cbz'),
+                          lambda issue: True, str(alias / 'F (2002)'), _name_for,
+                          str(alias))
+    assert plan.moves == ()
+    assert plan.skipped == ('F 001 (2002).cbz',)
+
 # --- guards -----------------------------------------------------------------
 
 @pytest.mark.unit

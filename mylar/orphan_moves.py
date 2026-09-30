@@ -70,7 +70,8 @@ def _move_one(source, destination, rename, was_moving=False):
     meaning a rename attempt started before a crash. Only in that case do we
     treat a missing source + existing destination as success (crash recovery).
     """
-    if os.path.abspath(source) == os.path.abspath(destination):
+    if (os.path.abspath(source) == os.path.abspath(destination)
+            and os.path.isfile(source)):
         return None           # already where it would be filed
     if not os.path.lexists(source):
         if os.path.isfile(destination) and was_moving:
