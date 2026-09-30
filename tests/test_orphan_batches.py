@@ -252,3 +252,17 @@ def test_batch_blockers_refuse_a_folder_monitor_over_the_library():
 def test_batch_blockers_refuse_a_second_job_and_a_missing_library():
     assert len(ob.batch_blockers(False, None, '/media', True)) == 1
     assert len(ob.batch_blockers(False, None, None, False)) == 1
+
+
+@pytest.mark.integration
+def test_backup_database_writes_a_consistent_copy_beside_the_original(tmp_path):
+    src = str(tmp_path / 'mylar.db')
+    conn = sqlite3.connect(src)
+    conn.execute('CREATE TABLE t (x)')
+    conn.execute('INSERT INTO t VALUES (1)')
+    conn.commit()
+
+    path = ob.backup_database(src, '20260930-120000')
+
+    assert path == str(tmp_path / 'mylar.db.orphans-20260930-120000')
+    assert sqlite3.connect(path).execute('SELECT x FROM t').fetchall() == [(1,)]

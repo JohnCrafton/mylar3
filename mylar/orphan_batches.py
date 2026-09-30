@@ -269,3 +269,21 @@ def batch_blockers(enable_check_folder, check_folder, library_root, job_running)
                 ' would post-process files while they are being moved. Point it'
                 ' at your downloads folder first.' % check_folder)
     return blockers
+
+
+def backup_database(path, stamp):
+    """Copy the database beside itself before a run moves anything.
+
+    sqlite's backup API, not a file copy: Mylar may be writing while it runs.
+    """
+    target = '%s.orphans-%s' % (path, stamp)
+    source = sqlite3.connect(path)
+    try:
+        copy = sqlite3.connect(target)
+        try:
+            source.backup(copy)
+        finally:
+            copy.close()
+    finally:
+        source.close()
+    return target

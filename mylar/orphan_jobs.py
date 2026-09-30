@@ -44,12 +44,14 @@ class JobState(object):
         self._stop = False
         self._progress = {}
         self._message = ''
+        self._wake = threading.Event()
 
     def begin(self, kind):
         with self._lock:
             if self._kind is not None:
                 return False
             self._kind, self._stop, self._progress, self._message = kind, False, {}, ''
+            self._wake.clear()
             return True
 
     def update(self, progress):
@@ -63,6 +65,11 @@ class JobState(object):
     def request_stop(self):
         with self._lock:
             self._stop = True
+            self._wake.set()
+
+    def sleep(self, seconds):
+        """Sleep, but wake early if a stop is requested."""
+        self._wake.wait(seconds)
 
     def should_stop(self):
         with self._lock:

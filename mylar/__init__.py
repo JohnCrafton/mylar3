@@ -870,6 +870,8 @@ def dbcheck():
         c.execute('SELECT TotalIssues from orphans')
     except sqlite3.OperationalError:
         c.execute('ALTER TABLE orphans ADD COLUMN TotalIssues INTEGER')
+    from mylar import orphan_batches
+    orphan_batches.apply_schema(c)
     c.execute('CREATE TABLE IF NOT EXISTS mylar_info(DatabaseVersion INTEGER PRIMARY KEY)')
     conn.commit()
 

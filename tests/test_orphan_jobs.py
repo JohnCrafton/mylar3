@@ -1,4 +1,6 @@
 import json
+import threading
+import time
 
 import pytest
 
@@ -172,6 +174,18 @@ def test_job_state_allows_one_job_at_a_time():
     assert state.snapshot()['message'] == 'done'
     assert state.begin('file') is True
     assert state.should_stop() is False
+
+
+@pytest.mark.unit
+def test_job_state_sleep_wakes_when_stop_is_requested():
+    state = oj.JobState()
+    state.begin('identify')
+    threading.Timer(0.05, state.request_stop).start()
+
+    started = time.monotonic()
+    state.sleep(5)
+
+    assert time.monotonic() - started < 1
 
 
 def _identified(db):
