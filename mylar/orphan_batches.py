@@ -38,8 +38,8 @@ from mylar import orphans
 # workbench.
 MIXED_SHARE = 0.6
 
-# The auto tier. Each threshold was measured against a real library of 5,409
-# orphans before it was written down; see the design notes.
+# The auto tier. Each threshold was checked against a real library's orphans
+# before it was written down.
 AUTO_SHARE = 0.95
 AUTO_NUMBERED = 0.95
 AUTO_IN_RUN = 0.95
@@ -167,7 +167,7 @@ def failed_checks(ev, ranked):
         ('year', ev.folder_year is None or
          (bool(top) and str(top.get('comicyear')) == ev.folder_year)),
         # a share, not the maximum: one revival issue past the listed run must
-        # not send 280 good files to review
+        # not send a whole folder of good files to review
         ('run', in_run >= AUTO_IN_RUN),
         ('share', ev.share >= AUTO_SHARE),
         ('numbered', numbered >= AUTO_NUMBERED),
