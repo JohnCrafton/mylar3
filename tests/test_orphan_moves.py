@@ -304,3 +304,113 @@ def test_revert_cancels_planned_failed_rows_after_restoring_done_rows(tmp_path):
     result = om.execute(db, batch, _now)
     assert result == om.MoveResult(0, 0, False)
     assert os.path.isfile(b)  # Second file was never moved
+
+
+@pytest.mark.integration
+def test_revert_puts_back_a_moving_row_whose_rename_happened(tmp_path):
+    # the process died after os.rename but before the row was marked done
+    a = _file(str(tmp_path / 'F' / 'a.cbz'), b'A')
+    b = _file(str(tmp_path / 'F' / 'b.cbz'), b'B')
+    db = FakeDB()
+    batch = _plan(db, [
+        ob.Move('move', 'o1', a, str(tmp_path / 'S' / 'a.cbz'), 'i1'),
+        ob.Move('move', 'o2', b, str(tmp_path / 'S' / 'b.cbz'), 'i2')])
+
+    def rename_then_die(source, destination):
+        os.rename(source, destination)
+        raise KeyboardInterrupt('died before the done mark')
+
+    with pytest.raises(KeyboardInterrupt):
+        om.execute(db, batch, _now, rename=rename_then_die)
+    assert _statuses(db) == [('move', 'moving'), ('move', 'planned')]
+
+    result = om.revert(db, batch, _now)
+
+    assert result == om.RevertResult(1, ())
+    assert open(a, 'rb').read() == b'A'
+    assert not os.path.exists(str(tmp_path / 'S' / 'a.cbz'))
+    assert _statuses(db) == [('move', 'reverted'), ('move', 'cancelled')]
+
+
+@pytest.mark.integration
+def test_revert_cancels_a_moving_row_whose_rename_never_happened(tmp_path):
+    a = _file(str(tmp_path / 'F' / 'a.cbz'), b'A')
+    db = FakeDB()
+    batch = _plan(db, [ob.Move('move', 'o1', a, str(tmp_path / 'S' / 'a.cbz'), 'i1')])
+    db.action("UPDATE orphan_moves SET Status='moving' WHERE BatchID=?", [batch])
+
+    result = om.revert(db, batch, _now)
+
+    assert result == om.RevertResult(0, ())
+    assert open(a, 'rb').read() == b'A'
+    assert _statuses(db) == [('move', 'cancelled')]
+
+
+class _UnrecordingDB(FakeDB):
+    """FakeDB whose writes fail the way mylar.db's do: action returns None."""
+    failing = False
+
+    def action(self, query, args=None, executemany=False):
+        if self.failing:
+            return None
+        return super(_UnrecordingDB, self).action(query, args, executemany)
+
+
+@pytest.mark.integration
+def test_execute_refuses_to_move_when_the_log_cannot_be_written(tmp_path):
+    a = _file(str(tmp_path / 'F' / 'a.cbz'))
+    db = _UnrecordingDB()
+    batch = _plan(db, [ob.Move('move', 'o1', a, str(tmp_path / 'S' / 'a.cbz'), 'i1')])
+    db.failing = True
+
+    with pytest.raises(RuntimeError, match='Could not record'):
+        om.execute(db, batch, _now)
+
+    assert os.path.isfile(a)
+    assert not os.path.exists(str(tmp_path / 'S' / 'a.cbz'))
+
+
+@pytest.mark.unit
+def test_record_plan_raises_when_the_plan_cannot_be_written(tmp_path):
+    db = _UnrecordingDB()
+    db.failing = True
+    with pytest.raises(RuntimeError, match='Could not record'):
+        _plan(db, [ob.Move('move', 'o1', str(tmp_path / 'a.cbz'),
+                           str(tmp_path / 'S' / 'a.cbz'), 'i1')])
+
+
+@pytest.mark.integration
+def test_revert_raises_when_a_note_cannot_be_written(tmp_path):
+    a = _file(str(tmp_path / 'F' / 'a.cbz'))
+    db = _UnrecordingDB()
+    batch = _plan(db, [ob.Move('move', 'o1', a, str(tmp_path / 'S' / 'a.cbz'), 'i1')])
+    om.execute(db, batch, _now)
+    _file(a, b'someone else')          # the original path is taken: revert notes it
+    db.failing = True
+
+    with pytest.raises(RuntimeError, match='Could not record'):
+        om.revert(db, batch, _now)
+
+
+@pytest.mark.integration
+def test_execute_counts_a_keeper_already_at_its_filed_path_as_done(tmp_path):
+    # the orphan already sits where the series would file it
+    a = _file(str(tmp_path / 'Fables (2002)' / 'Fables 001 (2002).cbz'), b'A')
+    db = FakeDB()
+    batch = _plan(db, [ob.Move('move', 'o1', a, a, 'i1')])
+
+    assert om.execute(db, batch, _now) == om.MoveResult(1, 0, False)
+    assert open(a, 'rb').read() == b'A'
+    assert _statuses(db) == [('move', 'done')]
+
+
+@pytest.mark.integration
+def test_revert_of_a_keeper_already_at_its_filed_path_leaves_it_and_is_not_skipped(tmp_path):
+    a = _file(str(tmp_path / 'Fables (2002)' / 'Fables 001 (2002).cbz'), b'A')
+    db = FakeDB()
+    batch = _plan(db, [ob.Move('move', 'o1', a, a, 'i1')])
+    om.execute(db, batch, _now)
+
+    assert om.revert(db, batch, _now) == om.RevertResult(1, ())
+    assert open(a, 'rb').read() == b'A'
+    assert _statuses(db) == [('move', 'reverted')]

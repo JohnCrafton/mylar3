@@ -39,18 +39,28 @@ def record_plan(db, run_id, batch_id, comicid, groupid_of, moves, when):
              m.issueid, m.kind, m.source, m.destination, 'planned', None, when)
             for seq, m in enumerate(moves)]
     if rows:
-        db.action(_INSERT, rows, executemany=True)
+        _written(db.action(_INSERT, rows, executemany=True), 'the plan for batch %s' % batch_id)
     return len(rows)
 
 
+def _written(result, what):
+    # mylar.db returns None rather than raising when a write fails; a file moved
+    # without its row is a file revert cannot find, so stop here instead
+    if result is None:
+        raise RuntimeError('Could not record %s' % what)
+    return result
+
+
 def _mark(db, batch_id, seq, status, error, when):
-    db.action('UPDATE orphan_moves SET Status=?, Error=?, WhenDone=?'
-              ' WHERE BatchID=? AND Seq=?', [status, error, when, batch_id, seq])
+    _written(db.action('UPDATE orphan_moves SET Status=?, Error=?, WhenDone=?'
+                       ' WHERE BatchID=? AND Seq=?', [status, error, when, batch_id, seq]),
+             'move %s of batch %s as %s' % (seq, batch_id, status))
 
 
 def _note(db, batch_id, seq, error):
-    db.action('UPDATE orphan_moves SET Error=? WHERE BatchID=? AND Seq=?',
-              [error, batch_id, seq])
+    _written(db.action('UPDATE orphan_moves SET Error=? WHERE BatchID=? AND Seq=?',
+                       [error, batch_id, seq]),
+             'a note on move %s of batch %s' % (seq, batch_id))
 
 
 def _move_one(source, destination, rename, was_moving=False):
@@ -60,6 +70,8 @@ def _move_one(source, destination, rename, was_moving=False):
     meaning a rename attempt started before a crash. Only in that case do we
     treat a missing source + existing destination as success (crash recovery).
     """
+    if os.path.abspath(source) == os.path.abspath(destination):
+        return None           # already where it would be filed
     if not os.path.lexists(source):
         if os.path.isfile(destination) and was_moving:
             # renamed before a crash could record it; this is recovery
@@ -159,12 +171,19 @@ def revert(db, batch_id, now, rename=os.rename):
 
     Never overwrites: a file whose original path has been taken since stays
     where it was filed, and is reported.
+
+    A 'moving' row is one a crash interrupted. If its file is still at the
+    source the rename never happened and the row is cancelled with the
+    planned ones; otherwise it is put back like a done row.
     """
-    rows = db.select("SELECT Seq, Kind, Source, Destination FROM orphan_moves"
-                     " WHERE BatchID=? AND Status='done' ORDER BY Seq DESC", [batch_id])
+    rows = db.select("SELECT Seq, Kind, Source, Destination, Status FROM orphan_moves"
+                     " WHERE BatchID=? AND Status IN ('done', 'moving') ORDER BY Seq DESC",
+                     [batch_id])
     reverted = 0
     skipped = []
     for row in rows:
+        if row['Status'] == 'moving' and os.path.lexists(row['Source']):
+            continue          # never renamed; cancelled with the planned rows
         if row['Kind'] == 'rmdir':
             if not os.path.isdir(row['Source']):
                 try:
@@ -177,7 +196,9 @@ def revert(db, batch_id, now, rename=os.rename):
             continue
 
         source, destination = row['Source'], row['Destination']
-        if os.path.lexists(source):
+        if os.path.abspath(source) == os.path.abspath(destination):
+            reason = None     # filed where it already was; nothing to move back
+        elif os.path.lexists(source):
             reason = 'original path is occupied'
         elif not os.path.isfile(destination):
             reason = 'the filed copy is no longer at %s' % destination
@@ -201,9 +222,11 @@ def revert(db, batch_id, now, rename=os.rename):
     # After restoring all done rows, cancel any remaining rows that are still
     # planned/failed/moving so a later execute() can't re-move files of a
     # reverted batch
-    db.action('UPDATE orphan_moves SET Status=? WHERE BatchID=?'
-              ' AND Kind IN (\'move\', \'park\') AND Status IN (\'planned\', \'failed\', \'moving\')',
-              ['cancelled', batch_id])
+    _written(db.action('UPDATE orphan_moves SET Status=? WHERE BatchID=?'
+                       ' AND Kind IN (\'move\', \'park\')'
+                       ' AND Status IN (\'planned\', \'failed\', \'moving\')',
+                       ['cancelled', batch_id]),
+             'the cancelled moves of batch %s' % batch_id)
 
     return RevertResult(reverted, tuple(skipped))
 
