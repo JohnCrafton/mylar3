@@ -70,10 +70,14 @@ def test_identify_stops_after_consecutive_failures_and_resumes():
     db.add_orphans(_fables(folder='/lib/A (2002)') + _fables(folder='/lib/B (2002)')
                    + _fables(folder='/lib/C (2002)') + _fables(folder='/lib/D (2002)'))
 
-    summary = oj.identify_groups(db, lambda *a: False, _now, _no_sleep, 20)
+    searched = []
+    slept = []
+    summary = oj.identify_groups(db, lambda *a: (searched.append(a), False)[1], _now, slept.append, 20)
 
     assert summary['stopped'] is True
     assert 'ComicVine' in summary['reason']
+    assert len(searched) == 3                      # exactly MAX_SEARCH_FAILURES
+    assert slept == [20, 20]                       # 2 sleeps before stop on 3rd failure
     assert _groups(db) == {}                      # nothing half-recorded
 
     summary = oj.identify_groups(db, lambda *a: _fables_result(), _now, _no_sleep, 20)
@@ -100,6 +104,60 @@ def test_identify_honours_stop():
                                  stop=lambda: True)
     assert summary['stopped'] is True
     assert _groups(db) == {}
+
+
+@pytest.mark.integration
+def test_identify_resets_failures_on_successful_search():
+    db = FakeDB()
+    db.add_orphans(_fables(folder='/lib/A (2002)') + _fables(folder='/lib/B (2002)')
+                   + _fables(folder='/lib/C (2002)') + _fables(folder='/lib/D (2002)')
+                   + _fables(folder='/lib/E (2002)'))
+
+    search_results = [False, False, True, False, False]
+    search_index = [0]
+
+    def search(*a):
+        result = search_results[search_index[0]]
+        search_index[0] += 1
+        return _fables_result() if result else False
+
+    summary = oj.identify_groups(db, search, _now, _no_sleep, 20)
+
+    assert summary['stopped'] is False
+    groups = _groups(db)
+    assert len(groups) == 1                       # only the successful one recorded
+    assert groups['/lib/C (2002)']['Tier'] == 'auto'
+
+
+class _FailingGroupInsertDB(FakeDB):
+    """FakeDB that returns None when inserting orphan_groups rows."""
+    def action(self, query, args=None, executemany=False):
+        if query.startswith('INSERT OR REPLACE INTO orphan_groups'):
+            return None
+        return super(_FailingGroupInsertDB, self).action(query, args, executemany)
+
+
+@pytest.mark.integration
+def test_identify_raises_on_group_record_failure():
+    db = _FailingGroupInsertDB()
+    db.add_orphans(_fables())
+
+    with pytest.raises(RuntimeError, match='Could not record group'):
+        oj.identify_groups(db, lambda *a: _fables_result(), _now, _no_sleep, 20)
+
+    # Orphan groups should stay empty (no half-recorded group)
+    assert _groups(db) == {}
+
+    # Orphans should be linked (the UPDATE happened before the failed INSERT)
+    linked = db.select("SELECT COUNT(*) AS n FROM orphans WHERE GroupID IS NOT NULL")
+    assert linked[0]['n'] == 3
+
+    # Subsequent run with normal DB should record the group successfully
+    db2 = FakeDB()
+    db2.add_orphans(_fables())
+    summary = oj.identify_groups(db2, lambda *a: _fables_result(), _now, _no_sleep, 20)
+    assert summary['stopped'] is False
+    assert len(_groups(db2)) == 1
 
 
 @pytest.mark.unit

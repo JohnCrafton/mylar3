@@ -84,20 +84,22 @@ def _unfiled_orphans(db):
 def _save_group(db, group, ev, ranked, tier, failed, when):
     known = [n for n in ev.numbers if n is not None]
     top = ranked[0] if ranked else None
-    db.action('INSERT OR REPLACE INTO orphan_groups (GroupID, Folder, Volume, Evidence,'
-              ' Candidates, Tier, Failed, ComicID, Status, IdentifiedDate)'
-              ' VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-              [group.groupid, group.folder, group.volume,
-               json.dumps({'series': ev.series, 'share': round(ev.share, 3),
-                           'year': ev.year, 'folder_year': ev.folder_year,
-                           'files': ev.files, 'max_issue': max(known) if known else None,
-                           'numbered': round(len(known) / float(ev.files), 3)}),
-               json.dumps(batches.candidate_summary(ranked)),
-               tier, json.dumps(failed),
-               top.get('comicid') if tier == 'auto' and top else None,
-               'identified', when])
     db.action('UPDATE orphans SET GroupID=? WHERE OrphanID=?',
               [(group.groupid, r['OrphanID']) for r in group.orphans], executemany=True)
+    result = db.action('INSERT OR REPLACE INTO orphan_groups (GroupID, Folder, Volume, Evidence,'
+                       ' Candidates, Tier, Failed, ComicID, Status, IdentifiedDate)'
+                       ' VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                       [group.groupid, group.folder, group.volume,
+                        json.dumps({'series': ev.series, 'share': round(ev.share, 3),
+                                    'year': ev.year, 'folder_year': ev.folder_year,
+                                    'files': ev.files, 'max_issue': max(known) if known else None,
+                                    'numbered': round(len(known) / float(ev.files), 3)}),
+                        json.dumps(batches.candidate_summary(ranked)),
+                        tier, json.dumps(failed),
+                        top.get('comicid') if tier == 'auto' and top else None,
+                        'identified', when])
+    if result is None:
+        raise RuntimeError('Could not record group %s' % group.groupid)
 
 
 def identify_groups(db, search, now, sleep, pace, stop=lambda: False,
