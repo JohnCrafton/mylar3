@@ -298,6 +298,7 @@ class _Deps(object):
         self.missing_series = missing_series
         self.stop_at = None
         self.stop_calls = 0
+        self.history_failures = 0
 
     def stop(self):
         # counts calls: the job asks once before the series, then execute asks
@@ -314,12 +315,18 @@ class _Deps(object):
             'SELECT IssueID, Issue_Number, Location FROM issues WHERE ComicID=?', [comicid])]
         return comic
 
+    def record_history(self, o, c, i, d):
+        if self.history_failures:
+            self.history_failures -= 1
+            raise RuntimeError('history down')
+        self.history.append((o['OrphanID'], d))
+
     def deps(self):
         return oj.FileDeps(
             ensure_series=self.ensure_series,
             name_for=lambda comic, o, i: 'Fables %03d (2002).cbz' % int(i['Issue_Number']),
             rescan=self.rescans.append,
-            record_history=lambda o, c, i, d: self.history.append((o['OrphanID'], d)),
+            record_history=self.record_history,
             now=_now, clock=lambda: 0.0, stop=self.stop,
             library_root=self.lib, progress=lambda d: None, log=self.logs.append)
 
@@ -497,5 +504,48 @@ def test_revert_with_occupied_source_marks_group_partial(tmp_path):
     assert db.select('SELECT Status FROM orphan_groups WHERE GroupID IN'
                      ' (SELECT DISTINCT GroupID FROM orphan_moves WHERE BatchID=?)',
                      [batch_id])[0]['Status'] == 'partial'
+
+
+@pytest.mark.integration
+def test_history_failure_is_retried_on_resume(tmp_path):
+    db, lib, folder = _library(tmp_path)
+    fake = _Deps(db, lib)
+    fake.history_failures = 1
+
+    results = oj.run_file_job(db, fake.deps(), 'run1')
+    batch_id = results[0].batch_id
+
+    # After first run, one moved orphan should not be filed due to history failure
+    moved_count = db.select('SELECT COUNT(*) AS n FROM orphan_moves WHERE BatchID=? AND Kind=? AND Status=?',
+                            [batch_id, 'move', 'done'])[0]['n']
+    filed_count = db.select('SELECT COUNT(*) AS n FROM orphans WHERE Status=?', ['filed'])[0]['n']
+    assert filed_count == moved_count - 1  # One less filed than moved
+    assert len(fake.history) == moved_count - 1
+
+    # Group should be 'partial' because not all moved orphans are filed
+    group_status = db.select('SELECT Status FROM orphan_groups WHERE GroupID IN'
+                             ' (SELECT DISTINCT GroupID FROM orphan_moves WHERE BatchID=?)',
+                             [batch_id])[0]['Status']
+    assert group_status == 'partial'
+
+    # Resume the batch
+    resumed = oj.resume_batch(db, batch_id, fake.deps())
+
+    # Resume should succeed
+    assert resumed.error is None
+
+    # All moved orphans should now be filed
+    filed_after = db.select('SELECT COUNT(*) AS n FROM orphans WHERE Status=?', ['filed'])[0]['n']
+    assert filed_after == moved_count
+
+    # No duplicate histories (each orphan recorded exactly once)
+    assert len(fake.history) == moved_count
+    assert len(set(o for o, _ in fake.history)) == len(fake.history)
+
+    # Group should now be 'filed'
+    group_status_after = db.select('SELECT Status FROM orphan_groups WHERE GroupID IN'
+                                   ' (SELECT DISTINCT GroupID FROM orphan_moves WHERE BatchID=?)',
+                                   [batch_id])[0]['Status']
+    assert group_status_after == 'filed'
 
 

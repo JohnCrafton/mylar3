@@ -273,6 +273,7 @@ def _finish(db, batch_id, comic, deps, skipped, started):
 
     moved = [r for r in done if r['Kind'] == 'move']
     parked = [r for r in done if r['Kind'] == 'park']
+    unrecorded = 0
     for row in moved:
         if row['Was'] == 'filed':
             continue          # recorded on an earlier pass of this batch
@@ -281,6 +282,7 @@ def _finish(db, batch_id, comic, deps, skipped, started):
                                 row['Destination'])
         except Exception as e:
             deps.log('[ORPHANS] Could not record history for %s: %s' % (row['FileName'], e))
+            unrecorded += 1
             continue
         db.action("UPDATE orphans SET Status='filed', IssueID=? WHERE OrphanID=?",
                   [row['IssueID'], row['OrphanID']])
@@ -294,7 +296,8 @@ def _finish(db, batch_id, comic, deps, skipped, started):
         deps.rescan(comic['ComicID'])
 
     counts = moves.batch_counts(db, batch_id)
-    finished = not counts.get('planned') and not counts.get('failed') and not counts.get('moving')
+    finished = (not counts.get('planned') and not counts.get('failed')
+                and not counts.get('moving') and not unrecorded)
     db.action('UPDATE orphan_groups SET Status=? WHERE GroupID IN'
               ' (SELECT DISTINCT GroupID FROM orphan_moves WHERE BatchID=?'
               " AND GroupID IS NOT NULL)", ['filed' if finished else 'partial', batch_id])
@@ -352,7 +355,11 @@ def resume_batch(db, batch_id, deps):
     if not rows:
         return BatchResult(batch_id, None, 0, 0, 0, 0, False, 'Unknown batch')
     counts = moves.batch_counts(db, batch_id)
-    if not (counts.get('planned') or counts.get('failed') or counts.get('moving')):
+    unfiled = db.select(
+        "SELECT COUNT(*) AS n FROM orphan_moves m JOIN orphans o ON o.OrphanID = m.OrphanID"
+        " WHERE m.BatchID=? AND m.Status='done' AND m.Kind='move' AND o.Status != 'filed'",
+        [batch_id])[0]['n']
+    if not (counts.get('planned') or counts.get('failed') or counts.get('moving') or unfiled):
         return BatchResult(batch_id, rows[0]['ComicID'], 0, 0, 0, 0, False,
                            'Nothing left to file in this batch.')
     comic = deps.ensure_series(rows[0]['ComicID'])
