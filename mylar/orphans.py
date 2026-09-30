@@ -32,7 +32,7 @@ import math
 import re
 
 # Status values for an orphan record.
-ORPHAN_STATUSES = frozenset(['new', 'identified', 'filed', 'ignored'])
+ORPHAN_STATUSES = frozenset(['new', 'identified', 'filed', 'ignored', 'parked'])
 
 # Weights per signal. Only the signals actually available are counted, and the
 # raw total is rescaled against what was achievable - see score_candidate.

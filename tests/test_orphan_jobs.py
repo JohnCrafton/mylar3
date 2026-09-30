@@ -275,3 +275,171 @@ def test_load_batches_counts_and_orders_newest_first():
     assert b1['planned'] == 0
     assert b1['reverted'] == 0
     assert b1['cancelled'] == 0
+
+
+import os
+
+from mylar import orphan_moves as om
+
+
+def _write(path, size):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, 'wb') as f:
+        f.write(b'x' * size)
+    return path
+
+
+class _Deps(object):
+    """FileDeps built over a FakeDB, recording what Mylar would have been asked."""
+
+    def __init__(self, db, lib, missing_series=False):
+        self.db, self.lib = db, lib
+        self.rescans, self.history, self.logs = [], [], []
+        self.missing_series = missing_series
+        self.stop_at = None
+        self.stop_calls = 0
+
+    def stop(self):
+        # counts calls: the job asks once before the series, then execute asks
+        # before each file
+        self.stop_calls += 1
+        return self.stop_at is not None and self.stop_calls >= self.stop_at
+
+    def ensure_series(self, comicid):
+        if self.missing_series:
+            return None
+        rows = self.db.select('SELECT * FROM comics WHERE ComicID=?', [comicid])
+        comic = dict(rows[0])
+        comic['issues'] = [dict(r) for r in self.db.select(
+            'SELECT IssueID, Issue_Number, Location FROM issues WHERE ComicID=?', [comicid])]
+        return comic
+
+    def deps(self):
+        return oj.FileDeps(
+            ensure_series=self.ensure_series,
+            name_for=lambda comic, o, i: 'Fables %03d (2002).cbz' % int(i['Issue_Number']),
+            rescan=self.rescans.append,
+            record_history=lambda o, c, i, d: self.history.append((o['OrphanID'], d)),
+            now=_now, clock=lambda: 0.0, stop=self.stop,
+            library_root=self.lib, progress=lambda d: None, log=self.logs.append)
+
+
+def _library(tmp_path):
+    lib = str(tmp_path / 'lib')
+    db = FakeDB()
+    db.action("INSERT INTO comics VALUES ('25543', 'Fables', '2002', ?, 'Active')",
+              [os.path.join(lib, 'Fables (2002)')])
+    db.action("INSERT INTO issues VALUES ('i1', '25543', '1', NULL), ('i2', '25543', '2', NULL),"
+              " ('i3', '25543', '3', NULL)")
+    folder = os.path.join(lib, 'Fables', 'Volume 01 (2002)')
+    rows = []
+    for name, issue, size in (('Fables 001.cbz', '001', 50), ('Fables 001 (1).cbz', '001', 49),
+                              ('Fables 002.cbz', '002', 40), ('Fables extra.cbz', None, 10)):
+        _write(os.path.join(folder, name), size)
+        rows.append(orphan(os.path.join(folder, name), OrphanID=name, ParsedSeries='Fables',
+                           ParsedIssue=issue, ParsedYear='2002', FileSize=size))
+    db.add_orphans(rows)
+    oj.identify_groups(db, lambda *a: _fables_result(), _now, _no_sleep, 20)
+    # one unnumbered file of four puts this group in review; approve it as a
+    # person would, by picking the series
+    db.action("UPDATE orphan_groups SET Status='approved', ComicID='25543'")
+    return db, lib, folder
+
+
+def _orphan_status(db):
+    return dict((r['OrphanID'], r['Status']) for r in db.select('SELECT OrphanID, Status FROM orphans'))
+
+
+@pytest.mark.integration
+def test_run_file_job_files_a_series_and_updates_everything(tmp_path):
+    db, lib, folder = _library(tmp_path)
+    fake = _Deps(db, lib)
+
+    results = oj.run_file_job(db, fake.deps(), 'run1')
+
+    assert [(r.moved, r.parked, r.skipped, r.failed, r.stopped) for r in results] == [(2, 1, 1, 0, False)]
+    series = os.path.join(lib, 'Fables (2002)')
+    assert sorted(os.listdir(series)) == ['Fables 001 (2002).cbz', 'Fables 002 (2002).cbz']
+    assert os.path.getsize(os.path.join(series, 'Fables 001 (2002).cbz')) == 50
+    assert os.path.isfile(os.path.join(lib, '_duplicates', 'Fables', 'Volume 01 (2002)',
+                                       'Fables 001 (1).cbz'))
+    assert _orphan_status(db) == {'Fables 001.cbz': 'filed', 'Fables 001 (1).cbz': 'parked',
+                                  'Fables 002.cbz': 'filed', 'Fables extra.cbz': 'new'}
+    assert fake.rescans == ['25543']
+    assert sorted(o for o, _ in fake.history) == ['Fables 001.cbz', 'Fables 002.cbz']
+    assert db.select('SELECT Status FROM orphan_groups')[0]['Status'] == 'filed'
+    assert any('2 moved, 1 parked, 1 skipped, 0 failed' in line for line in fake.logs)
+    # the unmapped file keeps its folder alive
+    assert os.path.isdir(folder)
+
+
+@pytest.mark.integration
+def test_a_series_that_cannot_be_added_moves_nothing(tmp_path):
+    db, lib, folder = _library(tmp_path)
+    results = oj.run_file_job(db, _Deps(db, lib, missing_series=True).deps(), 'run1')
+    assert results[0].error and results[0].moved == 0
+    assert len(os.listdir(folder)) == 4
+    assert db.select('SELECT COUNT(*) AS n FROM orphan_moves')[0]['n'] == 0
+
+
+@pytest.mark.integration
+def test_stop_then_resume_batch_finishes_without_duplicate_history(tmp_path):
+    db, lib, folder = _library(tmp_path)
+    fake = _Deps(db, lib)
+    fake.stop_at = 3          # series check, first file, then stop before the second
+    first = oj.run_file_job(db, fake.deps(), 'run1')
+    assert first[0].stopped is True
+    assert (first[0].moved, first[0].parked) == (1, 0)
+    assert db.select('SELECT Status FROM orphan_groups')[0]['Status'] == 'partial'
+    assert [o for o, _ in fake.history] == ['Fables 001.cbz']
+
+    fake.stop_at = None
+    resumed = oj.resume_batch(db, first[0].batch_id, fake.deps())
+
+    assert (resumed.moved, resumed.parked, resumed.stopped) == (2, 1, False)
+    assert sorted(o for o, _ in fake.history) == ['Fables 001.cbz', 'Fables 002.cbz']
+    assert db.select('SELECT Status FROM orphan_groups')[0]['Status'] == 'filed'
+
+
+@pytest.mark.integration
+def test_revert_run_restores_files_and_rows(tmp_path):
+    db, lib, folder = _library(tmp_path)
+    fake = _Deps(db, lib)
+    oj.run_file_job(db, fake.deps(), 'run1')
+
+    results = oj.revert_run(db, 'run1', fake.deps())
+
+    assert [r.reverted for r in results] == [3]
+    assert sorted(os.listdir(folder)) == ['Fables 001 (1).cbz', 'Fables 001.cbz',
+                                          'Fables 002.cbz', 'Fables extra.cbz']
+    assert set(_orphan_status(db).values()) <= {'identified', 'new'}
+    assert db.select('SELECT Status FROM orphan_groups')[0]['Status'] == 'reverted'
+    assert fake.rescans == ['25543', '25543']
+
+
+@pytest.mark.unit
+def test_wait_for_series_adds_once_then_waits_until_ready():
+    db = FakeDB()
+    added, slept = [], []
+
+    def add(comicid):
+        added.append(comicid)
+
+    def sleep(seconds):
+        slept.append(seconds)
+        if len(slept) == 1:
+            db.action("INSERT INTO comics VALUES ('7', 'X', '2000', '/lib/X (2000)', 'Loading')")
+        elif len(slept) == 2:
+            db.action("UPDATE comics SET Status='Active'")
+            db.action("INSERT INTO issues VALUES ('i1', '7', '1', NULL)")
+
+    comic = oj.wait_for_series(db, '7', add, sleep, timeout=60)
+    assert added == ['7']
+    assert comic['ComicLocation'] == '/lib/X (2000)'
+    assert comic['issues'] == [{'IssueID': 'i1', 'Issue_Number': '1', 'Location': None}]
+
+
+@pytest.mark.unit
+def test_wait_for_series_gives_up_after_timeout():
+    db = FakeDB()
+    assert oj.wait_for_series(db, '7', lambda c: None, lambda s: None, timeout=10, poll=5) is None
