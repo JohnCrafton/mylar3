@@ -1092,8 +1092,11 @@ class WebInterface(object):
         rows = myDB.select('SELECT * FROM orphans ORDER BY Status, FileName')
         results = []
         for row in rows:
-            if sSearch and sSearch.lower() not in (row['FileName'] or '').lower():
-                continue
+            if sSearch:
+                search_lower = sSearch.lower()
+                if not (search_lower in (row['FileName'] or '').lower() or
+                        search_lower in (row['FilePath'] or '').lower()):
+                    continue
             results.append([
                 row['FileName'],
                 row['ParsedSeries'],
