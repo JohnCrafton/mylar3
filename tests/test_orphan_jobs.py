@@ -350,7 +350,7 @@ def _library(tmp_path):
     db = FakeDB()
     db.action("INSERT INTO comics VALUES ('25543', 'Fables', '2002', ?, 'Active')",
               [os.path.join(lib, 'Fables (2002)')])
-    db.action("INSERT INTO issues VALUES ('i1', '25543', '1', NULL), ('i2', '25543', '2', NULL),"
+    db.action("INSERT INTO issues (IssueID, ComicID, Issue_Number, Location) VALUES ('i1', '25543', '1', NULL), ('i2', '25543', '2', NULL),"
               " ('i3', '25543', '3', NULL)")
     folder = os.path.join(lib, 'Fables', 'Volume 01 (2002)')
     rows = []
@@ -453,7 +453,7 @@ def test_wait_for_series_adds_once_then_waits_until_ready():
             db.action("INSERT INTO comics VALUES ('7', 'X', '2000', '/lib/X (2000)', 'Loading')")
         elif len(slept) == 2:
             db.action("UPDATE comics SET Status='Active'")
-            db.action("INSERT INTO issues VALUES ('i1', '7', '1', NULL)")
+            db.action("INSERT INTO issues (IssueID, ComicID, Issue_Number, Location) VALUES ('i1', '7', '1', NULL)")
 
     comic = oj.wait_for_series(db, '7', add, sleep, timeout=60)
     assert added == ['7']
@@ -578,3 +578,137 @@ def test_history_failure_is_retried_on_resume(tmp_path):
     assert group_status_after == 'filed'
 
 
+
+
+@pytest.mark.integration
+def test_a_file_mylar_already_tracks_is_marked_filed_and_never_moved(tmp_path):
+    db, lib, folder = _library(tmp_path)
+    series = os.path.join(lib, 'Fables (2002)')
+    tracked = _write(os.path.join(series, 'Fables 001 (2002).cbz'), 60)
+    db.action("UPDATE issues SET Location='Fables 001 (2002).cbz' WHERE IssueID='i1'")
+    # a scan listed Mylar's own file as an orphan, and its group was approved
+    db.add_orphans([orphan(tracked, OrphanID='tracked', ParsedSeries='Fables',
+                           ParsedIssue='001', ParsedYear='2002', FileSize=60)])
+    oj.identify_groups(db, lambda *a: _fables_result(), _now, _no_sleep, 20)
+    db.action("UPDATE orphan_groups SET Status='approved', ComicID='25543'")
+    fake = _Deps(db, lib)
+
+    results = oj.run_file_job(db, fake.deps(), 'run1')
+
+    assert [(r.moved, r.parked, r.skipped) for r in results] == [(1, 2, 2)]
+    assert os.path.getsize(tracked) == 60
+    assert db.select("SELECT COUNT(*) AS n FROM orphan_moves WHERE OrphanID='tracked'")[0]['n'] == 0
+    row = db.select("SELECT Status, IssueID FROM orphans WHERE OrphanID='tracked'")[0]
+    assert (row['Status'], row['IssueID']) == ('filed', 'i1')
+    assert 'tracked' not in [o for o, _ in fake.history]
+
+
+@pytest.mark.integration
+def test_a_crash_after_moving_leaves_the_batch_to_resume_not_to_file_again(tmp_path, monkeypatch):
+    from mylar import orphan_moves as om
+    db, lib, folder = _library(tmp_path)
+    fake = _Deps(db, lib)
+    real = om.remove_empty_dirs
+
+    def died(*a, **k):
+        raise RuntimeError('process died')
+
+    monkeypatch.setattr(om, 'remove_empty_dirs', died)
+    with pytest.raises(RuntimeError):
+        oj.run_file_job(db, fake.deps(), 'run1')
+    monkeypatch.setattr(om, 'remove_empty_dirs', real)
+
+    # the files moved but nothing after that was recorded
+    assert db.select('SELECT Status FROM orphan_groups')[0]['Status'] == 'partial'
+    [batch] = oj.load_batches(db)
+    assert batch['resumable'] is True
+
+    # File approved again must not plan the moved files a second time
+    assert oj.run_file_job(db, fake.deps(), 'run2') == []
+    assert len(oj.load_batches(db)) == 1
+
+    resumed = oj.resume_batch(db, batch['BatchID'], fake.deps())
+
+    assert resumed.error is None
+    assert _orphan_status(db) == {'Fables 001.cbz': 'filed', 'Fables 001 (1).cbz': 'parked',
+                                  'Fables 002.cbz': 'filed', 'Fables extra.cbz': 'new'}
+    assert sorted(o for o, _ in fake.history) == ['Fables 001.cbz', 'Fables 002.cbz']
+    assert db.select('SELECT Status FROM orphan_groups')[0]['Status'] == 'filed'
+    assert oj.load_batches(db)[0]['resumable'] is False
+
+
+@pytest.mark.integration
+def test_load_batches_marks_only_unfinished_batches_resumable(tmp_path):
+    db, lib, folder = _library(tmp_path)
+    fake = _Deps(db, lib)
+    fake.stop_at = 3
+    oj.run_file_job(db, fake.deps(), 'run1')
+    assert [b['resumable'] for b in oj.load_batches(db)] == [True]
+
+    fake.stop_at = None
+    oj.resume_batch(db, oj.load_batches(db)[0]['BatchID'], fake.deps())
+    assert [b['resumable'] for b in oj.load_batches(db)] == [False]
+
+
+def _issue_rows(db):
+    return dict((r['IssueID'], (r['Status'], r['Location'])) for r in db.select(
+        'SELECT IssueID, Status, Location FROM issues'))
+
+
+@pytest.mark.integration
+def test_revert_resets_the_issues_it_had_filed_before_rescanning(tmp_path):
+    db, lib, folder = _library(tmp_path)
+    fake = _Deps(db, lib)
+    oj.run_file_job(db, fake.deps(), 'run1')
+    # what Mylar's rescan and history made of the filed files, plus rows the
+    # batch never touched
+    db.action("UPDATE issues SET Status='Downloaded', Location='Fables 001 (2002).cbz'"
+              " WHERE IssueID='i1'")
+    db.action("UPDATE issues SET Status='Archived', Location='Fables 002 (2002).cbz'"
+              " WHERE IssueID='i2'")
+    db.action("UPDATE issues SET Status='Downloaded', Location='elsewhere.cbz'"
+              " WHERE IssueID='i3'")
+    db.action("INSERT INTO snatched (IssueID, ComicID, Status, Provider) VALUES"
+              " ('i1', '25543', 'Post-Processed', 'Orphan'),"
+              " ('i2', '25543', 'Post-Processed', 'Orphan'),"
+              " ('i1', '25543', 'Downloaded', 'GetComics'),"
+              " ('i3', '25543', 'Post-Processed', 'Orphan')")
+    seen = []
+    deps = fake.deps()._replace(rescan=lambda comicid: seen.append(_issue_rows(db)))
+
+    oj.revert_run(db, 'run1', deps)
+
+    expected = {'i1': ('Skipped', None), 'i2': ('Skipped', None),
+                'i3': ('Downloaded', 'elsewhere.cbz')}
+    assert seen == [expected]              # reset before Mylar looks at the disk
+    assert _issue_rows(db) == expected
+    assert sorted((r['IssueID'], r['Provider']) for r in db.select(
+        'SELECT IssueID, Provider FROM snatched')) == [('i1', 'GetComics'), ('i3', 'Orphan')]
+
+
+@pytest.mark.integration
+def test_revert_of_an_already_reverted_batch_leaves_its_groups_alone(tmp_path):
+    db, lib, folder = _library(tmp_path)
+    fake = _Deps(db, lib)
+    batch_id = oj.run_file_job(db, fake.deps(), 'run1')[0].batch_id
+    oj.revert_batch(db, batch_id, fake.deps())
+    # the group was approved and filed again by a later batch
+    db.action("UPDATE orphan_groups SET Status='filed'")
+
+    oj.revert_batch(db, batch_id, fake.deps())
+
+    assert db.select('SELECT Status FROM orphan_groups')[0]['Status'] == 'filed'
+
+
+@pytest.mark.integration
+def test_revert_of_a_batch_that_never_moved_frees_its_groups(tmp_path):
+    db, lib, folder = _library(tmp_path)
+    fake = _Deps(db, lib)
+    fake.stop_at = 2          # series check, then stop before the first file
+    batch_id = oj.run_file_job(db, fake.deps(), 'run1')[0].batch_id
+    assert db.select('SELECT Status FROM orphan_groups')[0]['Status'] == 'partial'
+
+    oj.revert_batch(db, batch_id, fake.deps())
+
+    assert db.select('SELECT Status FROM orphan_groups')[0]['Status'] == 'reverted'
+    assert len(os.listdir(folder)) == 4

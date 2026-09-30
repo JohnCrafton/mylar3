@@ -100,7 +100,7 @@
                         <td><a href="comicDetails?ComicID=${b['ComicID'] | h}">${b['ComicID'] | h}</a></td>
                         <td>${b['done'] | h}</td><td>${b['failed'] | h}</td><td>${b['planned'] | h}</td><td>${b['reverted'] | h}</td>
                         <td>
-%if b['failed'] or b['planned']:
+%if b['resumable']:
                             <a href="#" class="og-action" data-action="orphanBatchResume" data-batch="${b['BatchID'] | h}">Resume</a>
 %endif
 %if b['done']:
