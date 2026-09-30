@@ -227,3 +227,51 @@ def test_load_groups_splits_by_tier_and_decodes():
     assert first['Candidates'][0]['comicid'] == '25543'
     assert first['Failed'] == []
     assert first['FirstOrphanID'] is not None
+
+
+@pytest.mark.integration
+def test_load_batches_counts_and_orders_newest_first():
+    db = FakeDB()
+    # batch b1 (RunID r1, ComicID 100): Kind 'move' rows — 2 'done', 1 'failed', 1 'moving'; plus one Kind 'rmdir' 'done' row (must NOT be counted)
+    db.action("INSERT INTO orphan_moves (BatchID, Seq, RunID, ComicID, Kind, Status, WhenDone) VALUES (?, ?, ?, ?, ?, ?, ?)",
+              ['b1', 1, 'r1', '100', 'move', 'done', '2026-09-30 10:00:00'])
+    db.action("INSERT INTO orphan_moves (BatchID, Seq, RunID, ComicID, Kind, Status, WhenDone) VALUES (?, ?, ?, ?, ?, ?, ?)",
+              ['b1', 2, 'r1', '100', 'move', 'done', '2026-09-30 10:00:01'])
+    db.action("INSERT INTO orphan_moves (BatchID, Seq, RunID, ComicID, Kind, Status, WhenDone) VALUES (?, ?, ?, ?, ?, ?, ?)",
+              ['b1', 3, 'r1', '100', 'move', 'failed', '2026-09-30 10:00:02'])
+    db.action("INSERT INTO orphan_moves (BatchID, Seq, RunID, ComicID, Kind, Status, WhenDone) VALUES (?, ?, ?, ?, ?, ?, ?)",
+              ['b1', 4, 'r1', '100', 'move', 'moving', '2026-09-30 10:00:03'])
+    db.action("INSERT INTO orphan_moves (BatchID, Seq, RunID, ComicID, Kind, Status, WhenDone) VALUES (?, ?, ?, ?, ?, ?, ?)",
+              ['b1', 5, 'r1', '100', 'rmdir', 'done', '2026-09-30 10:00:04'])
+    # batch b2 (RunID r1, ComicID 200): one Kind 'park' 'done' row with WhenDone 2026-09-30 11:00:00 (newer)
+    db.action("INSERT INTO orphan_moves (BatchID, Seq, RunID, ComicID, Kind, Status, WhenDone) VALUES (?, ?, ?, ?, ?, ?, ?)",
+              ['b2', 1, 'r1', '200', 'park', 'done', '2026-09-30 11:00:00'])
+
+    result = oj.load_batches(db)
+
+    # Assert order is ['b2', 'b1'] (newest first)
+    assert [b['BatchID'] for b in result] == ['b2', 'b1']
+
+    # b2 checks: done=1 and failed/planned/reverted/moving/cancelled all 0
+    b2 = result[0]
+    assert b2['BatchID'] == 'b2'
+    assert b2['RunID'] == 'r1'
+    assert b2['ComicID'] == '200'
+    assert b2['done'] == 1
+    assert b2['failed'] == 0
+    assert b2['planned'] == 0
+    assert b2['reverted'] == 0
+    assert b2['moving'] == 0
+    assert b2['cancelled'] == 0
+
+    # b1 checks: done=2 failed=1 moving=1 planned=0 reverted=0 cancelled=0
+    b1 = result[1]
+    assert b1['BatchID'] == 'b1'
+    assert b1['RunID'] == 'r1'
+    assert b1['ComicID'] == '100'
+    assert b1['done'] == 2
+    assert b1['failed'] == 1
+    assert b1['moving'] == 1
+    assert b1['planned'] == 0
+    assert b1['reverted'] == 0
+    assert b1['cancelled'] == 0

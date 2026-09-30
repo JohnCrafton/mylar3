@@ -207,7 +207,7 @@ def load_batches(db):
                          " ORDER BY MAX(WhenDone) DESC"):
         entry = batches_.setdefault(row['BatchID'], {
             'BatchID': row['BatchID'], 'RunID': row['RunID'], 'ComicID': row['ComicID'],
-            'done': 0, 'failed': 0, 'planned': 0, 'reverted': 0, 'When': row['WhenDone']})
+            'done': 0, 'failed': 0, 'planned': 0, 'reverted': 0, 'moving': 0, 'cancelled': 0, 'When': row['WhenDone']})
         entry[row['Status']] = row['n']
         entry['When'] = max(entry['When'] or '', row['WhenDone'] or '')
     return sorted(batches_.values(), key=lambda b: b['When'] or '', reverse=True)
