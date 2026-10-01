@@ -425,3 +425,63 @@ def test_revert_of_a_keeper_already_at_its_filed_path_leaves_it_and_is_not_skipp
     assert om.revert(db, batch, _now) == om.RevertResult(1, ())
     assert open(a, 'rb').read() == b'A'
     assert _statuses(db) == [('move', 'reverted')]
+
+
+@pytest.mark.integration
+def test_execute_syncs_both_folders_before_marking_a_move_done(tmp_path):
+    # a crash after the row says done but before the rename reaches the disk
+    # leaves a done row whose file never moved; sync first, then mark
+    src = _file(str(tmp_path / 'F' / 'F 001.cbz'))
+    dst = str(tmp_path / 'S' / 'S 001.cbz')
+    db = FakeDB()
+    batch = _plan(db, [ob.Move('move', 'o1', src, dst, 'i1')])
+    synced = []
+
+    def sync(*folders):
+        synced.append((sorted(folders), _statuses(db)[0][1]))
+
+    assert om.execute(db, batch, _now, sync=sync) == om.MoveResult(1, 0, False)
+    assert synced == [(sorted([os.path.dirname(src), os.path.dirname(dst)]), 'moving')]
+    assert _statuses(db) == [('move', 'done')]
+
+
+@pytest.mark.integration
+def test_execute_leaves_a_row_moving_when_sync_fails(tmp_path):
+    # the rename may not be durable, so the row stays 'moving' for crash
+    # recovery to settle instead of claiming done
+    src = _file(str(tmp_path / 'a.cbz'))
+    dst = str(tmp_path / 'S' / 'a.cbz')
+    db = FakeDB()
+    batch = _plan(db, [ob.Move('move', 'o1', src, dst, 'i1')])
+
+    def sync(*folders):
+        raise OSError(errno.EIO, 'I/O error')
+
+    with pytest.raises(OSError):
+        om.execute(db, batch, _now, sync=sync)
+    assert _statuses(db) == [('move', 'moving')]
+
+
+@pytest.mark.integration
+def test_revert_syncs_both_folders_before_marking_reverted(tmp_path):
+    src = _file(str(tmp_path / 'F' / 'a.cbz'))
+    dst = str(tmp_path / 'S' / 'a.cbz')
+    db = FakeDB()
+    batch = _plan(db, [ob.Move('move', 'o1', src, dst, 'i1')])
+    om.execute(db, batch, _now)
+    synced = []
+
+    def sync(*folders):
+        synced.append((sorted(folders), _statuses(db)[0][1]))
+
+    om.revert(db, batch, _now, sync=sync)
+    assert synced == [(sorted([os.path.dirname(src), os.path.dirname(dst)]), 'done')]
+    assert _statuses(db) == [('move', 'reverted')]
+    assert os.path.isfile(src)
+
+
+@pytest.mark.integration
+def test_sync_folders_flushes_real_directories(tmp_path):
+    a = tmp_path / 'a'
+    a.mkdir()
+    om.sync_folders(str(a), str(tmp_path))

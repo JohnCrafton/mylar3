@@ -63,6 +63,20 @@ def _note(db, batch_id, seq, error):
              'a note on move %s of batch %s' % (seq, batch_id))
 
 
+def sync_folders(*folders):
+    """Flush each folder's entries to disk.
+
+    A rename lives in the folders, not the file; until they are flushed a
+    crash can undo it after the log already says it happened.
+    """
+    for folder in sorted(set(folders)):
+        fd = os.open(folder, os.O_RDONLY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+
+
 def _move_one(source, destination, rename, was_moving=False):
     """None when the file is at destination afterwards, else why not.
 
@@ -96,7 +110,7 @@ def _move_one(source, destination, rename, was_moving=False):
     return None
 
 
-def execute(db, batch_id, now, stop=lambda: False, rename=os.rename):
+def execute(db, batch_id, now, stop=lambda: False, rename=os.rename, sync=sync_folders):
     """Carry out a batch's planned (or previously failed) moves, in order.
 
     stop is asked before each file; answering True leaves the rest planned for
@@ -113,6 +127,9 @@ def execute(db, batch_id, now, stop=lambda: False, rename=os.rename):
         # Mark the row as 'moving' to record that a rename attempt is starting
         _mark(db, batch_id, row['Seq'], 'moving', None, now())
         error = _move_one(row['Source'], row['Destination'], rename, was_moving=was_moving)
+        if not error:
+            # a failure here leaves the row 'moving' for crash recovery to settle
+            sync(os.path.dirname(row['Source']), os.path.dirname(row['Destination']))
         _mark(db, batch_id, row['Seq'], 'failed' if error else 'done', error, now())
         if error:
             failed += 1
@@ -167,7 +184,7 @@ def remove_empty_dirs(db, batch_id, library_root, now, rmdir=os.rmdir):
     return removed
 
 
-def revert(db, batch_id, now, rename=os.rename):
+def revert(db, batch_id, now, rename=os.rename, sync=sync_folders):
     """Undo a batch's completed rows, last first.
 
     Never overwrites: a file whose original path has been taken since stays
@@ -212,6 +229,10 @@ def revert(db, batch_id, now, rename=os.rename):
                 rename(destination, source)
             except OSError as e:
                 reason = str(e)
+            else:
+                # outside the try: the file did move, so a failed sync must not
+                # be reported as a file that could not be put back
+                sync(os.path.dirname(source), os.path.dirname(destination))
 
         if reason:
             skipped.append((source, reason))
