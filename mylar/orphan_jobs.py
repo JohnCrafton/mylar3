@@ -501,6 +501,16 @@ def keeper_path(db, issueid):
     return batches.tracked_path(dict(rows[0]), rows[0]['ComicLocation'])
 
 
+def parse_batch_ids(batch_id, batch_ids, all_ids):
+    """The batches a delete covers: BatchIDs (comma-separated) if given, even
+    when empty (then none), else the one BatchID, else all_ids()."""
+    if batch_ids is not None:
+        return [b for b in (part.strip() for part in batch_ids.split(',')) if b]
+    if batch_id:
+        return [batch_id]
+    return all_ids()
+
+
 def delete_parked_job(db, batch_ids, deps):
     """Delete parked duplicates batch by batch, then clear emptied folders."""
     root = os.path.join(deps.library_root, batches.DUPLICATES_DIR)

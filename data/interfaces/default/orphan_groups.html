@@ -350,7 +350,7 @@
                         $('#od_go').prop('disabled', true).off('click').on('click', function(){
                                 if ($(this).prop('disabled')) return;
                                 $('#orphan_delete_dialog').dialog('close');
-                                startJob('orphanDeleteParked', params);
+                                startJob('orphanDeleteParked', {BatchIDs: p.batch_ids.join(',')});
                         });
                         $('#od_cancel').off('click').on('click', function(){ $('#orphan_delete_dialog').dialog('close'); });
                 }).fail(function(){ setSticky('Request failed - see the Mylar log.'); });

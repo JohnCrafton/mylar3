@@ -1865,35 +1865,37 @@ class WebInterface(object):
                                'Deleting parked duplicates is switched off in Settings.'})
         return None
 
-    def _parked_batch_ids(self, myDB, BatchID):
-        if BatchID:
-            return [BatchID]
-        return [r['BatchID'] for r in myDB.select(
-            "SELECT DISTINCT BatchID FROM orphan_moves WHERE Kind='park'"
-            " AND Status IN ('done', 'deleting') ORDER BY BatchID")]
+    def _parked_batch_ids(self, myDB, BatchID, BatchIDs=None):
+        return orphan_jobs.parse_batch_ids(BatchID, BatchIDs, lambda: [
+            r['BatchID'] for r in myDB.select(
+                "SELECT DISTINCT BatchID FROM orphan_moves WHERE Kind='park'"
+                " AND Status IN ('done', 'deleting') ORDER BY BatchID")])
 
-    def orphanDeleteParkedPreview(self, BatchID=None, **kwargs):
+    def orphanDeleteParkedPreview(self, BatchID=None, BatchIDs=None, **kwargs):
         refusal = self._orphan_delete_refusal()
         if refusal:
             return refusal
         myDB = db.DBConnection()
-        ids = self._parked_batch_ids(myDB, BatchID)
+        ids = self._parked_batch_ids(myDB, BatchID, BatchIDs)
         root = os.path.join(mylar.CONFIG.DESTINATION_DIR, orphan_batches.DUPLICATES_DIR)
         preview = orphan_moves.preview_delete(
             myDB, ids, lambda row: orphan_jobs.keeper_path(myDB, row['IssueID']), root) \
             if ids else {'files': 0, 'bytes': 0, 'kept': []}
         preview['status'] = 'success'
+        preview['batch_ids'] = ids
         return json.dumps(preview)
     orphanDeleteParkedPreview.exposed = True
 
-    def orphanDeleteParked(self, BatchID=None, **kwargs):
+    def orphanDeleteParked(self, BatchID=None, BatchIDs=None, **kwargs):
         refusal = self._orphan_delete_refusal()
         if refusal:
             return refusal
+        if BatchIDs is not None and not orphan_jobs.parse_batch_ids(None, BatchIDs, list):
+            return json.dumps({'status': 'failure', 'message': 'No batches to delete from.'})
 
         def work(myDB, deps):
             results = orphan_jobs.delete_parked_job(
-                myDB, self._parked_batch_ids(myDB, BatchID), deps)
+                myDB, self._parked_batch_ids(myDB, BatchID, BatchIDs), deps)
             freed = sum(r.bytes for r in results)
             return 'Deleted %d parked duplicates (%s freed); %d kept - see the log.' % (
                 sum(r.deleted for r in results), helpers.human_size(freed),
