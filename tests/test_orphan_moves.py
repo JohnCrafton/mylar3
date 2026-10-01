@@ -487,6 +487,25 @@ def test_sync_folders_flushes_real_directories(tmp_path):
     om.sync_folders(str(a), str(tmp_path))
 
 
+@pytest.mark.integration
+def test_revert_reports_deleted_parks_and_restores_moves(tmp_path):
+    db = FakeDB()
+    a = _file(str(tmp_path / 'F' / 'a.cbz'), b'keep')
+    b = _file(str(tmp_path / 'F' / 'b.cbz'), b'dupe')
+    filed = str(tmp_path / 'S' / 'a.cbz')
+    batch = _plan(db, [ob.Move('move', 'o1', a, filed, 'i1'),
+                       ob.Move('park', 'o2', b, ob.park_destination(b, str(tmp_path)), 'i1')])
+    db.add_orphans([{'OrphanID': 'o2', 'FilePath': b, 'FileName': 'b.cbz', 'Status': 'parked'}])
+    om.execute(db, batch, _now)
+    om.delete_parked(db, batch, _now, lambda row: filed, _dupes(tmp_path))
+
+    result = om.revert(db, batch, _now)
+
+    assert result.reverted == 1 and os.path.isfile(a)
+    assert result.skipped == ((b, 'deleted on %s; cannot be put back' % _now()),)
+    assert _statuses(db) == [('move', 'reverted'), ('park', 'deleted')]
+
+
 # --- deleting parked duplicates -------------------------------------------
 
 def _dupes(tmp_path):

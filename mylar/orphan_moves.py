@@ -317,6 +317,11 @@ def revert(db, batch_id, now, rename=os.rename, sync=sync_folders):
     source the rename never happened and the row is cancelled with the
     planned ones; otherwise it is put back like a done row.
     """
+    gone = tuple((r['Source'], 'deleted on %s; cannot be put back' % r['WhenDone'])
+                 for r in db.select("SELECT Source, WhenDone FROM orphan_moves"
+                                    " WHERE BatchID=? AND Kind='park'"
+                                    " AND Status IN ('deleted', 'deleting')"
+                                    " ORDER BY Seq DESC", [batch_id]))
     rows = db.select("SELECT Seq, Kind, Source, Destination, Status FROM orphan_moves"
                      " WHERE BatchID=? AND Status IN ('done', 'moving') ORDER BY Seq DESC",
                      [batch_id])
@@ -373,7 +378,7 @@ def revert(db, batch_id, now, rename=os.rename, sync=sync_folders):
                        ['cancelled', batch_id]),
              'the cancelled moves of batch %s' % batch_id)
 
-    return RevertResult(reverted, tuple(skipped))
+    return RevertResult(reverted, gone + tuple(skipped))
 
 
 def batch_counts(db, batch_id):
