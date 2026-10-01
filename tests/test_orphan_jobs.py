@@ -712,3 +712,99 @@ def test_revert_of_a_batch_that_never_moved_frees_its_groups(tmp_path):
 
     assert db.select('SELECT Status FROM orphan_groups')[0]['Status'] == 'reverted'
     assert len(os.listdir(folder)) == 4
+
+
+def _filed_with_a_park(tmp_path):
+    db, lib, folder = _library(tmp_path)
+    fake = _Deps(db, lib)
+    batch_id = oj.run_file_job(db, fake.deps(), 'run1')[0].batch_id
+    db.action("UPDATE issues SET Location='Fables 001 (2002).cbz' WHERE IssueID='i1'")
+    return db, lib, folder, fake, batch_id
+
+
+@pytest.mark.integration
+def test_revert_batch_with_deleted_parks_restores_the_rest(tmp_path):
+    db, lib, folder, fake, batch_id = _filed_with_a_park(tmp_path)
+    oj.delete_parked_job(db, [batch_id], fake.deps())
+
+    result = oj.revert_batch(db, batch_id, fake.deps())
+
+    assert [reason for _, reason in result.skipped] == [
+        'deleted on %s; cannot be put back' % _now()]
+    assert sorted(os.listdir(folder)) == ['Fables 001.cbz', 'Fables 002.cbz', 'Fables extra.cbz']
+    assert _orphan_status(db)['Fables 001 (1).cbz'] == 'deleted'
+    assert _orphan_status(db)['Fables 001.cbz'] == 'identified'
+    assert db.select('SELECT Status FROM orphan_groups')[0]['Status'] == 'partial'
+
+
+@pytest.mark.integration
+def test_keeper_path_is_the_issue_file_in_the_series_folder(tmp_path):
+    db = FakeDB()
+    db.action("INSERT INTO comics (ComicID, ComicLocation, Status) VALUES ('c1', ?, 'Active')",
+              [str(tmp_path / 'S')])
+    db.action("INSERT INTO issues (IssueID, ComicID, Location) VALUES ('i1', 'c1', 'a.cbz'),"
+              " ('i2', 'c1', NULL)")
+    assert oj.keeper_path(db, 'i1') == os.path.realpath(str(tmp_path / 'S' / 'a.cbz'))
+    assert oj.keeper_path(db, 'i2') is None
+    assert oj.keeper_path(db, 'nope') is None
+
+
+@pytest.mark.integration
+def test_delete_parked_job_deletes_and_clears_empty_folders(tmp_path):
+    db, lib, folder, fake, batch_id = _filed_with_a_park(tmp_path)
+    parked = os.path.join(lib, '_duplicates', 'Fables', 'Volume 01 (2002)', 'Fables 001 (1).cbz')
+    assert os.path.isfile(parked)
+
+    results = oj.delete_parked_job(db, [batch_id], fake.deps())
+
+    assert [r.deleted for r in results] == [1]
+    assert not os.path.exists(os.path.join(lib, '_duplicates', 'Fables'))
+    assert os.path.isdir(os.path.join(lib, '_duplicates'))
+    assert os.path.isfile(os.path.join(lib, 'Fables (2002)', 'Fables 001 (2002).cbz'))
+    assert any(batch_id in m and '1 deleted' in m for m in fake.logs)
+
+
+@pytest.mark.integration
+def test_delete_parked_job_keeps_parks_whose_issue_has_no_file(tmp_path):
+    db, lib, folder, fake, batch_id = _filed_with_a_park(tmp_path)
+    db.action("UPDATE issues SET Location=NULL WHERE IssueID='i1'")
+    results = oj.delete_parked_job(db, [batch_id], fake.deps())
+    assert [r.deleted for r in results] == [0]
+    assert [reason for _, reason in results[0].kept] == ['issue has no recorded file']
+
+
+@pytest.mark.integration
+def test_load_batches_counts_parked_and_deleted(tmp_path):
+    from mylar import orphan_batches as ob, orphan_moves as om
+    db = FakeDB()
+    db.add_orphans([orphan('/l/F/a.cbz', OrphanID='o1', FileSize=10, Status='parked'),
+                    orphan('/l/F/b.cbz', OrphanID='o2', FileSize=32, Status='parked')])
+    om.record_plan(db, 'r1', 'b1', 'c1', {}, [
+        ob.Move('park', 'o1', '/l/F/a.cbz', '/l/_duplicates/F/a.cbz', 'i1'),
+        ob.Move('park', 'o2', '/l/F/b.cbz', '/l/_duplicates/F/b.cbz', 'i2')], _now())
+    db.action("UPDATE orphan_moves SET Status='done', WhenDone=?", [_now()])
+    db.action("UPDATE orphan_moves SET Status='deleted' WHERE OrphanID='o1'")
+    batch = oj.load_batches(db)[0]
+    assert (batch['parked'], batch['parked_bytes'], batch['deleted']) == (1, 32, 1)
+
+
+@pytest.mark.integration
+def test_delete_parked_job_goes_on_to_the_next_batch_when_unlink_is_refused(tmp_path, monkeypatch):
+    db, lib, folder, fake, batch_id = _filed_with_a_park(tmp_path)
+    real = oj.moves.delete_parked
+    calls = []
+
+    def refusing_first(*args, **kwargs):
+        calls.append(1)
+        if len(calls) == 1:
+            def refuse(path):
+                raise PermissionError(13, 'Permission denied')
+            kwargs['unlink'] = refuse
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(oj.moves, 'delete_parked', refusing_first)
+    # the same batch twice stands in for two batches: the first pass is refused
+    results = oj.delete_parked_job(db, [batch_id, batch_id], fake.deps())
+
+    assert [r.deleted for r in results] == [0, 1]
+    assert [reason for _, reason in results[0].kept] == ['could not delete: Permission denied']

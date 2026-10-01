@@ -71,6 +71,7 @@ from mylar import (
     notifiers,
     orphan_batches,
     orphan_jobs,
+    orphan_moves,
     orphans as orphanlib,
     parseit,
     PostProcessor,
@@ -1720,6 +1721,7 @@ class WebInterface(object):
         return serve_template(templatename="orphan_groups.html", title="Orphan Groups",
                               groups=orphan_jobs.load_groups(myDB),
                               batches=orphan_jobs.load_batches(myDB),
+                              allow_delete=bool(mylar.CONFIG.ORPHANS_ALLOW_DELETE),
                               job=orphan_jobs.STATE.snapshot())
     orphanGroups.exposed = True
 
@@ -1949,6 +1951,53 @@ class WebInterface(object):
 
         return self._orphan_background('revert', work)
     orphanRunRevert.exposed = True
+
+    def _orphan_delete_refusal(self):
+        if not mylar.CONFIG.ENABLE_ORPHANS:
+            return json.dumps({'status': 'failure', 'message': 'Orphans is disabled'})
+        if not mylar.CONFIG.ORPHANS_ALLOW_DELETE:
+            return json.dumps({'status': 'failure', 'message':
+                               'Deleting parked duplicates is switched off in Settings.'})
+        return None
+
+    def _parked_batch_ids(self, myDB, BatchID, BatchIDs=None):
+        return orphan_jobs.parse_batch_ids(BatchID, BatchIDs, lambda: [
+            r['BatchID'] for r in myDB.select(
+                "SELECT DISTINCT BatchID FROM orphan_moves WHERE Kind='park'"
+                " AND Status IN ('done', 'deleting') ORDER BY BatchID")])
+
+    def orphanDeleteParkedPreview(self, BatchID=None, BatchIDs=None, **kwargs):
+        refusal = self._orphan_delete_refusal()
+        if refusal:
+            return refusal
+        myDB = db.DBConnection()
+        ids = self._parked_batch_ids(myDB, BatchID, BatchIDs)
+        root = os.path.join(mylar.CONFIG.DESTINATION_DIR, orphan_batches.DUPLICATES_DIR)
+        preview = orphan_moves.preview_delete(
+            myDB, ids, lambda row: orphan_jobs.keeper_path(myDB, row['IssueID']), root) \
+            if ids else {'files': 0, 'bytes': 0, 'kept': []}
+        preview['status'] = 'success'
+        preview['batch_ids'] = ids
+        return json.dumps(preview)
+    orphanDeleteParkedPreview.exposed = True
+
+    def orphanDeleteParked(self, BatchID=None, BatchIDs=None, **kwargs):
+        refusal = self._orphan_delete_refusal()
+        if refusal:
+            return refusal
+        if BatchIDs is not None and not orphan_jobs.parse_batch_ids(None, BatchIDs, list):
+            return json.dumps({'status': 'failure', 'message': 'No batches to delete from.'})
+
+        def work(myDB, deps):
+            results = orphan_jobs.delete_parked_job(
+                myDB, self._parked_batch_ids(myDB, BatchID, BatchIDs), deps)
+            freed = sum(r.bytes for r in results)
+            return 'Deleted %d parked duplicates (%s freed); %d kept - see the log.' % (
+                sum(r.deleted for r in results), helpers.human_size(freed),
+                sum(len(r.kept) for r in results))
+
+        return self._orphan_background('delete', work)
+    orphanDeleteParked.exposed = True
 
     def read_orphan(self, OrphanID=None, page_num=0, size=None):
         """Page through an orphan in the existing web reader.
@@ -8083,6 +8132,7 @@ class WebInterface(object):
                     "enable_issue_events": helpers.checked(mylar.CONFIG.ENABLE_ISSUE_EVENTS),
                     "issue_events_retention_days": mylar.CONFIG.ISSUE_EVENTS_RETENTION_DAYS,
                     "enable_orphans": helpers.checked(mylar.CONFIG.ENABLE_ORPHANS),
+                    "orphans_allow_delete": helpers.checked(mylar.CONFIG.ORPHANS_ALLOW_DELETE),
                     "orphan_scan_dir": mylar.CONFIG.ORPHAN_SCAN_DIR if mylar.CONFIG.ORPHAN_SCAN_DIR else "",
                }
         return serve_template(templatename="config.html", title="Settings", config=config, comicinfo=comicinfo)
@@ -8416,7 +8466,7 @@ class WebInterface(object):
                            'boxcar_onsnatch', 'pushbullet_enabled', 'pushbullet_onsnatch', 'telegram_enabled', 'telegram_onsnatch', 'telegram_image', 'discord_enabled', 'discord_onsnatch', 'slack_enabled', 'slack_onsnatch',
                            'email_enabled', 'email_enc', 'email_ongrab', 'email_onpost', 'gotify_enabled', 'gotify_server_url', 'gotify_token', 'gotify_onsnatch', 'opds_enable', 'opds_authentication', 'opds_metainfo', 'opds_pagesize', 'enable_ddl',
                            'enable_getcomics', 'enable_airdcpp', 'jd2_enable', 'enable_external_server', 'ddl_prefer_upscaled', 'deluge_pause',
-                           'enable_nav_menu', 'enable_issue_events', 'enable_orphans'] #enable_public
+                           'enable_nav_menu', 'enable_issue_events', 'enable_orphans', 'orphans_allow_delete'] #enable_public
 
         for checked_config in checked_configs:
             if checked_config not in kwargs:

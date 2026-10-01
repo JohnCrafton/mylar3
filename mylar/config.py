@@ -153,6 +153,7 @@ _CONFIG_DEFINITIONS = OrderedDict({
     'ISSUE_EVENTS_RETENTION_DAYS': (int, 'Interface', 60),
     'ENABLE_ORPHANS': (bool, 'Interface', False),
     'ORPHAN_SCAN_DIR': (str, 'Interface', None),
+    'ORPHANS_ALLOW_DELETE': (bool, 'Interface', False),
 
     'API_ENABLED' : (bool, 'API', False),
     'API_KEY' : (str, 'API', None),

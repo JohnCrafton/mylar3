@@ -217,11 +217,21 @@ def load_batches(db):
                          " ORDER BY MAX(WhenDone) DESC"):
         entry = batches_.setdefault(row['BatchID'], {
             'BatchID': row['BatchID'], 'RunID': row['RunID'], 'ComicID': row['ComicID'],
-            'done': 0, 'failed': 0, 'planned': 0, 'reverted': 0, 'moving': 0, 'cancelled': 0, 'When': row['WhenDone']})
+            'done': 0, 'failed': 0, 'planned': 0, 'reverted': 0, 'moving': 0, 'cancelled': 0, 'deleted': 0, 'deleting': 0,
+            'When': row['WhenDone']})
         entry[row['Status']] = row['n']
         entry['When'] = max(entry['When'] or '', row['WhenDone'] or '')
     for entry in batches_.values():
         entry['resumable'] = resumable(db, entry['BatchID'])
+    for row in db.select("SELECT m.BatchID, COUNT(*) AS n, COALESCE(SUM(o.FileSize), 0) AS b"
+                         " FROM orphan_moves m LEFT JOIN orphans o ON o.OrphanID = m.OrphanID"
+                         " WHERE m.Kind='park' AND m.Status='done' GROUP BY m.BatchID"):
+        if row['BatchID'] in batches_:
+            batches_[row['BatchID']]['parked'] = row['n']
+            batches_[row['BatchID']]['parked_bytes'] = row['b']
+    for entry in batches_.values():
+        entry.setdefault('parked', 0)
+        entry.setdefault('parked_bytes', 0)
     return sorted(batches_.values(), key=lambda b: b['When'] or '', reverse=True)
 
 
@@ -480,3 +490,49 @@ def revert_run(db, run_id, deps):
         'SELECT BatchID, MAX(WhenDone) AS w FROM orphan_moves WHERE RunID=?'
         ' GROUP BY BatchID ORDER BY w DESC', [run_id])]
     return [revert_batch(db, b, deps) for b in batch_ids]
+
+
+def keeper_path(db, issueid):
+    """The file Mylar records for an issue, resolved; None if none recorded."""
+    rows = db.select('SELECT i.Location, c.ComicLocation FROM issues i'
+                     ' JOIN comics c ON c.ComicID = i.ComicID WHERE i.IssueID=?', [issueid])
+    if not rows or not rows[0]['ComicLocation']:
+        return None
+    return batches.tracked_path(dict(rows[0]), rows[0]['ComicLocation'])
+
+
+def parse_batch_ids(batch_id, batch_ids, all_ids):
+    """The batches a delete covers: BatchIDs (comma-separated) if given, even
+    when empty (then none), else the one BatchID, else all_ids()."""
+    if batch_ids is not None:
+        return [b for b in (part.strip() for part in batch_ids.split(',')) if b]
+    if batch_id:
+        return [batch_id]
+    return all_ids()
+
+
+def delete_parked_job(db, batch_ids, deps):
+    """Delete parked duplicates batch by batch, then clear emptied folders."""
+    root = os.path.join(deps.library_root, batches.DUPLICATES_DIR)
+    results = []
+    for position, batch_id in enumerate(batch_ids):
+        if deps.stop():
+            break
+        gone = [r['Destination'] for r in db.select(
+            "SELECT Destination FROM orphan_moves WHERE BatchID=? AND Kind='park'"
+            " AND Status IN ('done', 'deleting')", [batch_id])]
+        result = moves.delete_parked(db, batch_id, deps.now,
+                                     lambda row: keeper_path(db, row['IssueID']), root,
+                                     stop=deps.stop)
+        moves.remove_empty_folders(gone, root)
+        results.append(result)
+        deps.progress({'done': position + 1, 'total': len(batch_ids),
+                       'deleted': sum(r.deleted for r in results),
+                       'kept': sum(len(r.kept) for r in results)})
+        deps.log('[ORPHANS] Batch %s: %d deleted (%d bytes), %d kept%s%s' % (
+            batch_id, result.deleted, result.bytes, len(result.kept),
+            ''.join('; %s (%s)' % k for k in result.kept),
+            ', stopped' if result.stopped else ''))
+        if result.stopped:
+            break
+    return results

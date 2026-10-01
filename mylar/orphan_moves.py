@@ -77,6 +77,148 @@ def sync_folders(*folders):
             os.close(fd)
 
 
+REASONS = {
+    'missing': 'not at logged path',
+    'no_keeper_record': 'issue has no recorded file',
+    'keeper_missing': 'kept file missing',
+    'same_file': 'is the kept file',
+    'outside': 'outside _duplicates',
+    'keeper_smaller': 'kept file is smaller',
+}
+
+# A parked copy this much bigger than the kept file might be the better one.
+_SIZE_TOLERANCE = 1.05
+
+
+def deletable(destination, keeper, duplicates_root):
+    """None when a parked copy may be deleted, else the reason it stays.
+
+    keeper is the file Mylar records for the issue the copy duplicates, or
+    None when it records none. Checked against the disk as it is now: the log
+    can be out of date (another tool may have renamed either file since).
+    """
+    if not os.path.isfile(destination) or os.path.islink(destination):
+        return REASONS['missing']
+    inside = os.path.join(os.path.realpath(duplicates_root), '')
+    if not os.path.realpath(destination).startswith(inside):
+        return REASONS['outside']
+    if keeper is None:
+        return REASONS['no_keeper_record']
+    if not os.path.isfile(keeper):
+        return REASONS['keeper_missing']
+    try:
+        if (os.path.realpath(keeper) == os.path.realpath(destination)
+                or os.path.samefile(keeper, destination)):
+            return REASONS['same_file']
+        keeper_size = os.path.getsize(keeper)
+        park_size = os.path.getsize(destination)
+    except OSError:
+        # If samefile, realpath or a size read raises (e.g. keeper vanished between
+        # the isfile check and here), fail closed: treat keeper as missing
+        return REASONS['keeper_missing']
+    if keeper_size == 0 or park_size > keeper_size * _SIZE_TOLERANCE:
+        return REASONS['keeper_smaller']
+    return None
+
+
+DeleteResult = collections.namedtuple('DeleteResult', 'deleted kept bytes stopped')
+
+
+def _parked_rows(db, batch_ids):
+    marks = ', '.join('?' * len(batch_ids))
+    return db.select("SELECT BatchID, Seq, OrphanID, IssueID, Destination, Status"
+                     " FROM orphan_moves WHERE BatchID IN (%s) AND Kind='park'"
+                     " AND Status IN ('done', 'deleting') ORDER BY BatchID, Seq" % marks,
+                     list(batch_ids))
+
+
+def _size(path):
+    try:
+        return os.path.getsize(path)
+    except OSError:
+        return 0
+
+
+def preview_delete(db, batch_ids, keeper_for, duplicates_root):
+    """What delete_parked would do now, without doing it."""
+    files = size = 0
+    kept = []
+    for row in _parked_rows(db, batch_ids):
+        destination = row['Destination']
+        if row['Status'] == 'deleting' and not os.path.lexists(destination):
+            files += 1
+            continue
+        reason = deletable(destination, keeper_for(row), duplicates_root)
+        if reason:
+            kept.append([destination, reason])
+        else:
+            files += 1
+            size += _size(destination)
+    return {'files': files, 'bytes': size, 'kept': kept}
+
+
+def delete_parked(db, batch_id, now, keeper_for, duplicates_root, stop=lambda: False,
+                  unlink=os.unlink, sync=sync_folders):
+    """Delete a batch's parked copies that pass deletable, logging each first.
+
+    A 'deleting' row is one a crash interrupted: gone means finish it, still
+    there means check and delete it again. A failed sync raises and leaves
+    the row 'deleting' for the next run to settle. A refused unlink puts the
+    row back to 'done', reports the file kept, and carries on.
+    """
+    deleted = size = 0
+    kept = []
+    for row in _parked_rows(db, [batch_id]):
+        if stop():
+            return DeleteResult(deleted, tuple(kept), size, True)
+        destination = row['Destination']
+        if not (row['Status'] == 'deleting' and not os.path.lexists(destination)):
+            reason = deletable(destination, keeper_for(row), duplicates_root)
+            if reason:
+                if row['Status'] == 'deleting':
+                    _mark(db, batch_id, row['Seq'], 'done', None, now())
+                kept.append((destination, reason))
+                continue
+            _mark(db, batch_id, row['Seq'], 'deleting', None, now())
+            freed = _size(destination)
+            try:
+                unlink(destination)
+            except FileNotFoundError:
+                freed = 0         # already gone: finish the row below
+            except OSError as e:
+                _mark(db, batch_id, row['Seq'], 'done', 'could not delete: %s' % e.strerror,
+                      now())
+                kept.append((destination, 'could not delete: %s' % e.strerror))
+                continue
+            sync(os.path.dirname(destination))
+            size += freed
+        _mark(db, batch_id, row['Seq'], 'deleted', None, now())
+        _written(db.action("UPDATE orphans SET Status='deleted' WHERE OrphanID=?",
+                           [row['OrphanID']]), 'orphan %s as deleted' % row['OrphanID'])
+        deleted += 1
+    return DeleteResult(deleted, tuple(kept), size, False)
+
+
+def remove_empty_folders(paths, root, rmdir=os.rmdir):
+    """Remove folders emptied under root, deepest first; never root itself."""
+    inside = os.path.join(os.path.abspath(root), '')
+    candidates = set()
+    for path in paths:
+        folder = os.path.dirname(os.path.abspath(path))
+        while folder.startswith(inside):
+            candidates.add(folder)
+            folder = os.path.dirname(folder)
+    removed = []
+    for folder in sorted(candidates, key=lambda p: (-p.count(os.sep), p)):
+        try:
+            if os.path.isdir(folder) and not os.listdir(folder):
+                rmdir(folder)
+                removed.append(folder)
+        except OSError:
+            continue
+    return removed
+
+
 def _move_one(source, destination, rename, was_moving=False):
     """None when the file is at destination afterwards, else why not.
 
@@ -194,9 +336,19 @@ def revert(db, batch_id, now, rename=os.rename, sync=sync_folders):
     source the rename never happened and the row is cancelled with the
     planned ones; otherwise it is put back like a done row.
     """
-    rows = db.select("SELECT Seq, Kind, Source, Destination, Status FROM orphan_moves"
-                     " WHERE BatchID=? AND Status IN ('done', 'moving') ORDER BY Seq DESC",
-                     [batch_id])
+    # A 'deleting' row is a delete a crash interrupted: with its file gone it
+    # is a deletion that cannot be undone, with the file there it is a park.
+    gone, rows = [], []
+    for r in db.select("SELECT Seq, Kind, Source, Destination, Status, WhenDone"
+                       " FROM orphan_moves WHERE BatchID=?"
+                       " AND Status IN ('done', 'moving', 'deleting', 'deleted')"
+                       " ORDER BY Seq DESC", [batch_id]):
+        if r['Status'] == 'deleted' or (r['Status'] == 'deleting'
+                                        and not os.path.lexists(r['Destination'])):
+            gone.append((r['Source'], 'deleted on %s; cannot be put back' % r['WhenDone']))
+        else:
+            rows.append(r)
+    gone = tuple(gone)
     reverted = 0
     skipped = []
     for row in rows:
@@ -250,7 +402,7 @@ def revert(db, batch_id, now, rename=os.rename, sync=sync_folders):
                        ['cancelled', batch_id]),
              'the cancelled moves of batch %s' % batch_id)
 
-    return RevertResult(reverted, tuple(skipped))
+    return RevertResult(reverted, gone + tuple(skipped))
 
 
 def batch_counts(db, batch_id):
