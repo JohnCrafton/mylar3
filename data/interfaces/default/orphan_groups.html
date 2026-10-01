@@ -24,6 +24,9 @@
     counts = dict((t, (len(groups.get(t, [])), sum(g['Files'] for g in groups.get(t, []))))
                   for t in ('auto', 'review', 'mixed'))
     approved = sum(1 for t in groups.values() for g in t if g['Status'] == 'approved')
+    from mylar import helpers as _helpers
+    parked_total = sum(b['parked'] for b in batches)
+    parked_size = _helpers.human_size(sum(b['parked_bytes'] for b in batches))
 %>
             <p>
                 <strong>Auto</strong> ${counts['auto'][0] | h} groups / ${counts['auto'][1] | h} files &nbsp;&middot;&nbsp;
@@ -92,6 +95,9 @@
             </table>
 
             <h2>Batches</h2>
+%if allow_delete and parked_total:
+            <p><input type="button" class="og-action og-delete" data-batch="" value="Delete all parked duplicates (${parked_total | h} files, ${parked_size | h})" /></p>
+%endif
             <table class="orphan_panel" style="width:100%">
                 <thead><tr><th>When</th><th>Batch</th><th>Series</th><th>Done</th><th>Parked</th><th>Failed</th><th>Planned</th><th>Reverted</th><th></th></tr></thead>
                 <tbody>
@@ -110,6 +116,9 @@
                             <input type="button" class="og-action" data-action="orphanRunRevert" data-run="${b['RunID'] | h}" data-confirm="Revert every batch of run ${b['RunID'] | h}?" value="Revert run" />
 %endif
 %endif
+%if allow_delete and b['parked']:
+                            <input type="button" class="og-action og-delete" data-batch="${b['BatchID'] | h}" value="Delete ${b['parked'] | h} parked" />
+%endif
                         </td>
                     </tr>
 %endfor
@@ -119,6 +128,13 @@
 
         <div id="orphan_group_dialog" title="Group" style="display:none" class="configtable">
             <div id="orphan_group_body"></div>
+        </div>
+
+        <div id="orphan_delete_dialog" title="Delete parked duplicates" style="display:none" class="configtable">
+            <p id="od_summary"></p>
+            <p><strong>This permanently deletes the files. Revert cannot bring them back.</strong></p>
+            <div id="od_kept"></div>
+            <p>Type <code>DELETE</code> to confirm: <input type="text" id="od_typed" autocomplete="off" size="10" /></p>
         </div>
 </%def>
 
@@ -302,6 +318,45 @@
             });
         }
 
+        var deleteFiles = 0;
+
+        function humanBytes(n){
+                var units = ['B', 'KB', 'MB', 'GB', 'TB'], i = 0;
+                while (n >= 1024 && i < units.length - 1){ n /= 1024; i++; }
+                return (i ? n.toFixed(1) : n) + ' ' + units[i];
+        }
+
+        function openDelete(batch){
+                var params = batch ? {BatchID: batch} : {};
+                $.getJSON('orphanDeleteParkedPreview', params, function(p){
+                        if (p.status !== 'success'){ setSticky(p.message || 'Preview failed'); return; }
+                        deleteFiles = p.files;
+                        $('#od_summary').text(p.files + ' parked files (' + humanBytes(p.bytes) + ') will be deleted.');
+                        var kept = '';
+                        if (p.kept.length){
+                                kept = '<p>' + p.kept.length + ' will stay:</p><ul>';
+                                $.each(p.kept.slice(0, 20), function(i, k){
+                                        kept += '<li>' + esc(k[0]) + ' - ' + esc(k[1]) + '</li>';
+                                });
+                                if (p.kept.length > 20) kept += '<li>and ' + (p.kept.length - 20) + ' more, listed in the log after deleting</li>';
+                                kept += '</ul>';
+                        }
+                        $('#od_kept').html(kept);
+                        $('#od_typed').val('');
+                        $('#orphan_delete_dialog').dialog({
+                                width: 640, modal: true,
+                                buttons: [
+                                        {text: 'Delete', id: 'od_go', click: function(){
+                                                $(this).dialog('close');
+                                                startJob('orphanDeleteParked', params);
+                                        }},
+                                        {text: 'Cancel', click: function(){ $(this).dialog('close'); }}
+                                ]
+                        });
+                        $('#od_go').button('disable');
+                }).fail(function(){ setSticky('Request failed - see the Mylar log.'); });
+        }
+
         $(document).ready(function(){
                 initActions();
                 $('#hide_filed').prop('checked', hideFiledSetting());
@@ -314,6 +369,16 @@
                 $('.auto_include').on('change', updateApproveText);
                 $('#btn_approve').on('click', approveAuto);
                 $('#btn_stop').on('click', stopJob);
+
+                $(document).on('click', 'input.og-delete', function(e){
+                        e.preventDefault();
+                        if ($(this).prop('disabled') || jobRunning) return;
+                        openDelete($(this).data('batch') || '');
+                });
+                $(document).on('input keyup', '#od_typed', function(){
+                        var ok = $(this).val() === 'DELETE' && deleteFiles > 0;
+                        $('#od_go').button(ok ? 'enable' : 'disable');
+                });
 
                 $(document).on('click', 'a.og-action[data-group]', function(e){
                         e.preventDefault();
