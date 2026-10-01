@@ -1087,3 +1087,53 @@ def test_survey_ignores_parked_duplicates(tmp_path):
     make_cbz(tmp_path / 'loose.cbz', pages=2)
     report = orphans.survey(str(tmp_path))
     assert [r['FileName'] for r in report.found] == ['loose.cbz']
+
+
+# --- hiding reconciled rows ----------------------------------------------
+
+def _row(name, status, path='/media/x/'):
+    return {'FileName': name, 'FilePath': path + name, 'Status': status}
+
+
+_ROWS = [_row('a.cbz', 'new'), _row('b.cbz', 'identified'), _row('c.cbz', 'filed'),
+         _row('d.cbz', 'parked'), _row('e.cbz', 'ignored')]
+
+
+@pytest.mark.unit
+def test_visible_orphans_hides_filed_and_parked():
+    shown = orphans.visible_orphans(_ROWS, hide_reconciled=True)
+    assert [r['FileName'] for r in shown.rows] == ['a.cbz', 'b.cbz', 'e.cbz']
+    assert shown.hidden == 2
+
+
+@pytest.mark.unit
+def test_visible_orphans_shows_everything_when_not_hiding():
+    shown = orphans.visible_orphans(_ROWS, hide_reconciled=False)
+    assert [r['FileName'] for r in shown.rows] == [r['FileName'] for r in _ROWS]
+    assert shown.hidden == 0
+
+
+@pytest.mark.unit
+def test_visible_orphans_search_matches_name_or_path_case_insensitively():
+    rows = [_row('Saga 001.cbz', 'new', '/media/Saga/'), _row('x.cbz', 'new', '/media/SAGA v2/'),
+            _row('y.cbz', 'new')]
+    shown = orphans.visible_orphans(rows, search='saga')
+    assert [r['FileName'] for r in shown.rows] == ['Saga 001.cbz', 'x.cbz']
+    assert shown.hidden == 0
+
+
+@pytest.mark.unit
+def test_visible_orphans_counts_only_search_matches_as_hidden():
+    rows = [_row('saga.cbz', 'filed'), _row('other.cbz', 'filed'), _row('saga 2.cbz', 'new')]
+    shown = orphans.visible_orphans(rows, search='saga', hide_reconciled=True)
+    assert [r['FileName'] for r in shown.rows] == ['saga 2.cbz']
+    assert shown.hidden == 1
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("raw,expected", [
+    ('1', True), ('true', True), ('True', True),
+    ('0', False), ('false', False), ('', False), (None, False), ('yes please', False),
+])
+def test_parse_flag(raw, expected):
+    assert orphans.parse_flag(raw) is expected

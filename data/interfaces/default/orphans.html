@@ -41,6 +41,7 @@
                 <br/><small>No scan directory set yet - add one under Settings &rarr; Web Interface.</small>
 %endif
             </p>
+            <label><input type="checkbox" id="hide_filed" /> Hide filed and parked</label>
             <table class="display" id="orphans_table" style="width:100%;">
                 <thead>
                     <tr>
@@ -514,6 +515,16 @@
                 });
         }
 
+        // shared with the Orphan Groups page; storage can be blocked, so fall
+        // back to hiding
+        function hideFiledSetting(){
+            try { return localStorage.getItem('mylar.orphans.hideFiled') !== '0'; }
+            catch (e) { return true; }
+        }
+        function saveHideFiled(on){
+            try { localStorage.setItem('mylar.orphans.hideFiled', on ? '1' : '0'); } catch (e) {}
+        }
+
         function initThisPage(){
             var searchParam = new URLSearchParams(location.search).get('search');
             var config = {
@@ -522,6 +533,13 @@
                 "processing": true,
                 "serverSide": true,
                 "ajaxSource": 'loadOrphans',
+                "fnServerParams": function(aoData){
+                    aoData.push({name: 'hideFiled', value: $('#hide_filed').is(':checked') ? '1' : '0'});
+                },
+                "infoCallback": function(settings, start, end, max, total, pre){
+                    var hidden = settings.json ? settings.json.iHidden : 0;
+                    return hidden ? pre + ' (' + hidden + ' filed or parked hidden)' : pre;
+                },
                 "columnDefs": [
                     { "targets": [0], "render": function(d,t,full){
                         return '<span title="' + esc(full[8]) + '">' + esc(full[0]) + '</span>' +
@@ -542,6 +560,7 @@
                 ],
                 "oLanguage": {
                     "sEmptyTable": "No orphans recorded - run a scan",
+                    "sZeroRecords": "Nothing to show - untick Hide filed to see filed and parked files",
                     "sSearch": "Filter: ",
                     "sInfo": "Showing _START_ to _END_ of _TOTAL_ files",
                     "sInfoEmpty": "Showing 0 to 0 of 0 files"
@@ -554,6 +573,11 @@
         }
 
         $(document).ready(function(){
+                $('#hide_filed').prop('checked', hideFiledSetting());
+                $('#hide_filed').on('change', function(){
+                    saveHideFiled(this.checked);
+                    $('#orphans_table').DataTable().ajax.reload();
+                });
                 initThisPage();
         });
 %endif

@@ -35,16 +35,17 @@
                 <input type="button" class="og-action" id="btn_approve" value="Approve ${counts['auto'][0] | h} auto groups" />
                 <input type="button" class="og-action" data-action="orphanGroupsFile" data-confirm="Move every approved group into your library? A database backup is taken first, and each batch can be reverted." value="File approved groups" />
                 <input type="button" id="btn_stop" value="Stop" disabled="disabled" />
+                &nbsp;<label><input type="checkbox" id="hide_filed" /> Hide filed</label>
             </p>
 
-            <h2>Auto</h2>
-            <table class="orphan_panel" style="width:100%">
+            <h2>Auto <small class="og-hidden-note"></small></h2>
+            <table class="orphan_panel og-groups" style="width:100%">
                 <thead><tr><th>Include</th><th>Folder</th><th>Files</th><th>Series</th><th>Status</th></tr></thead>
                 <tbody>
 %for g in groups.get('auto', []):
 <% top = g['Candidates'][0] if g['Candidates'] else {} %>
 %if top:
-                    <tr>
+                    <tr data-status="${g['Status'] | h}">
                         <td><input type="checkbox" class="auto_include" value="${g['GroupID'] | h}" ${'checked' if g['Status'] == 'identified' else 'disabled'} /></td>
                         <td>${(g['Folder'] + (' [' + g['Volume'] + ']' if g['Volume'] else '')) | h}</td>
                         <td>${g['Files'] | h}</td>
@@ -61,13 +62,13 @@
                 </tbody>
             </table>
 
-            <h2>Review</h2>
-            <table class="orphan_panel" style="width:100%">
+            <h2>Review <small class="og-hidden-note"></small></h2>
+            <table class="orphan_panel og-groups" style="width:100%">
                 <thead><tr><th>Folder</th><th>Files</th><th>Best match</th><th>Why not auto</th><th>Status</th></tr></thead>
                 <tbody>
 %for g in groups.get('review', []):
 <% top = g['Candidates'][0] if g['Candidates'] else {} %>
-                    <tr>
+                    <tr data-status="${g['Status'] | h}">
                         <td><a href="#" class="og-action" data-group="${g['GroupID'] | h}">${(g['Folder'] + (' [' + g['Volume'] + ']' if g['Volume'] else '')) | h}</a></td>
                         <td>${g['Files'] | h}</td>
                         <td>${(top.get('name') or 'no ComicVine match') | h} ${('(%s)' % top.get('comicyear')) if top.get('comicyear') else '' | h}</td>
@@ -78,14 +79,14 @@
                 </tbody>
             </table>
 
-            <h2>Mixed</h2>
+            <h2>Mixed <small class="og-hidden-note"></small></h2>
             <p>Folders without one series in them - reading orders, collections. File these from the
                <a href="orphans">per-file workbench</a>.</p>
-            <table class="orphan_panel" style="width:100%">
+            <table class="orphan_panel og-groups" style="width:100%">
                 <thead><tr><th>Folder</th><th>Files</th></tr></thead>
                 <tbody>
 %for g in groups.get('mixed', []):
-                    <tr><td><a href="orphans?search=${g['Folder'] | u}">${(g['Folder'] + (' [' + g['Volume'] + ']' if g['Volume'] else '')) | h}</a></td><td>${g['Files'] | h}</td></tr>
+                    <tr data-status="${g['Status'] | h}"><td><a href="orphans?search=${g['Folder'] | u}">${(g['Folder'] + (' [' + g['Volume'] + ']' if g['Volume'] else '')) | h}</a></td><td>${g['Files'] | h}</td></tr>
 %endfor
                 </tbody>
             </table>
@@ -277,8 +278,37 @@
                 });
         }
 
+        // shared with the Orphans page; storage can be blocked, so fall back
+        // to hiding
+        function hideFiledSetting(){
+            try { return localStorage.getItem('mylar.orphans.hideFiled') !== '0'; }
+            catch (e) { return true; }
+        }
+        function saveHideFiled(on){
+            try { localStorage.setItem('mylar.orphans.hideFiled', on ? '1' : '0'); } catch (e) {}
+        }
+        function applyHideFiled(){
+            var hide = $('#hide_filed').is(':checked');
+            $('table.og-groups').each(function(){
+                var filed = $(this).find('tbody tr[data-status="filed"]');
+                filed.toggle(!hide);
+                var left = $(this).find('tbody tr').length - filed.length;
+                var note = '';
+                if (hide && filed.length){
+                    note = '- ' + filed.length + ' filed, hidden' + (left ? '' : '; nothing left to do');
+                }
+                $(this).prevAll('h2').first().find('.og-hidden-note').text(note);
+            });
+        }
+
         $(document).ready(function(){
                 initActions();
+                $('#hide_filed').prop('checked', hideFiledSetting());
+                $('#hide_filed').on('change', function(){
+                    saveHideFiled(this.checked);
+                    applyHideFiled();
+                });
+                applyHideFiled();
                 updateApproveText();
                 $('.auto_include').on('change', updateApproveText);
                 $('#btn_approve').on('click', approveAuto);

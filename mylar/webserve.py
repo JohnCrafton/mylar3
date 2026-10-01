@@ -1178,20 +1178,17 @@ class WebInterface(object):
     orphans.exposed = True
 
     def loadOrphans(self, iDisplayStart=0, iDisplayLength=100, iSortCol_0=0,
-                    sSortDir_0="asc", sSearch="", **kwargs):
+                    sSortDir_0="asc", sSearch="", hideFiled=None, **kwargs):
         if not mylar.CONFIG.ENABLE_ORPHANS:
             return json.dumps({'iTotalDisplayRecords': 0, 'iTotalRecords': 0,
-                               'aaData': []})
+                               'aaData': [], 'iHidden': 0})
 
         myDB = db.DBConnection()
         rows = myDB.select('SELECT * FROM orphans ORDER BY Status, FileName')
+        shown = orphanlib.visible_orphans(rows, sSearch,
+                                          orphanlib.parse_flag(hideFiled))
         results = []
-        for row in rows:
-            if sSearch:
-                search_lower = sSearch.lower()
-                if not (search_lower in (row['FileName'] or '').lower() or
-                        search_lower in (row['FilePath'] or '').lower()):
-                    continue
+        for row in shown.rows:
             results.append([
                 row['FileName'],
                 row['ParsedSeries'],
@@ -1209,7 +1206,8 @@ class WebInterface(object):
         iDisplayLength = int(iDisplayLength)
         page = results if iDisplayLength == -1 else results[iDisplayStart:iDisplayStart + iDisplayLength]
         return json.dumps({'iTotalDisplayRecords': len(results),
-                           'iTotalRecords': total, 'aaData': page})
+                           'iTotalRecords': total, 'aaData': page,
+                           'iHidden': shown.hidden})
     loadOrphans.exposed = True
 
     def orphanScan(self, **kwargs):
