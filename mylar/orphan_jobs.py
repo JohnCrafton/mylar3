@@ -147,6 +147,10 @@ def identify_groups(db, search, now, sleep, pace, stop=lambda: False,
             # issue and year only rank: as search filters they dropped the real
             # series whenever a cover date or issue ran past ComicVine's counts
             results = search(ev.series)
+            shorter = orphans.shorter_query(ev.series)
+            if results == [] and shorter:
+                sleep(pace)
+                results = search(shorter)
             searched = True
             if results is False:
                 failures += 1

@@ -117,6 +117,37 @@ def test_identify_asks_again_for_groups_whose_search_found_nothing():
 
 
 @pytest.mark.integration
+def test_identify_retries_a_shorter_title_when_the_full_one_finds_nothing():
+    db = FakeDB()
+    db.add_orphans([orphan('/lib/Sin City/a.cbz', OrphanID='s1',
+                           ParsedSeries='Sin City - Episode', ParsedIssue='1')])
+    calls = []
+
+    def search(series):
+        calls.append(series)
+        return [] if series == 'Sin City - Episode' else [
+            {'comicid': '1', 'name': 'Sin City', 'comicyear': '1991', 'issues': '13'}]
+
+    oj.identify_groups(db, search, _now, _no_sleep, 20)
+
+    assert calls == ['Sin City - Episode', 'Sin City']
+    group = _groups(db)['/lib/Sin City']
+    assert json.loads(group['Candidates'])[0]['name'] == 'Sin City'
+    assert json.loads(group['Evidence'])['series'] == 'Sin City - Episode'
+
+
+@pytest.mark.integration
+def test_identify_does_not_retry_after_a_failed_search():
+    db = FakeDB()
+    db.add_orphans([orphan('/lib/Sin City/a.cbz', OrphanID='s1',
+                           ParsedSeries='Sin City - Episode', ParsedIssue='1')])
+    calls = []
+    oj.identify_groups(db, lambda series: calls.append(series) or False, _now, _no_sleep, 20)
+    assert calls == ['Sin City - Episode']
+    assert _groups(db) == {}
+
+
+@pytest.mark.integration
 def test_identify_honours_stop():
     db = FakeDB()
     db.add_orphans(_fables(folder='/lib/A (2002)') + [
