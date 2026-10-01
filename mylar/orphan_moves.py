@@ -102,10 +102,102 @@ def deletable(destination, keeper, duplicates_root):
         return REASONS['no_keeper_record']
     if not os.path.isfile(keeper):
         return REASONS['keeper_missing']
-    if (os.path.realpath(keeper) == os.path.realpath(destination)
-            or os.path.samefile(keeper, destination)):
-        return REASONS['same_file']
+    try:
+        if (os.path.realpath(keeper) == os.path.realpath(destination)
+                or os.path.samefile(keeper, destination)):
+            return REASONS['same_file']
+    except OSError:
+        # If samefile or realpath raises (e.g. keeper vanished between isfile check
+        # and samefile), fail closed: treat keeper as missing
+        return REASONS['keeper_missing']
     return None
+
+
+DeleteResult = collections.namedtuple('DeleteResult', 'deleted kept bytes stopped')
+
+
+def _parked_rows(db, batch_ids):
+    marks = ', '.join('?' * len(batch_ids))
+    return db.select("SELECT BatchID, Seq, OrphanID, IssueID, Destination, Status"
+                     " FROM orphan_moves WHERE BatchID IN (%s) AND Kind='park'"
+                     " AND Status IN ('done', 'deleting') ORDER BY BatchID, Seq" % marks,
+                     list(batch_ids))
+
+
+def _size(path):
+    try:
+        return os.path.getsize(path)
+    except OSError:
+        return 0
+
+
+def preview_delete(db, batch_ids, keeper_for, duplicates_root):
+    """What delete_parked would do now, without doing it."""
+    files = size = 0
+    kept = []
+    for row in _parked_rows(db, batch_ids):
+        destination = row['Destination']
+        if row['Status'] == 'deleting' and not os.path.lexists(destination):
+            files += 1
+            continue
+        reason = deletable(destination, keeper_for(row), duplicates_root)
+        if reason:
+            kept.append([destination, reason])
+        else:
+            files += 1
+            size += _size(destination)
+    return {'files': files, 'bytes': size, 'kept': kept}
+
+
+def delete_parked(db, batch_id, now, keeper_for, duplicates_root, stop=lambda: False,
+                  unlink=os.unlink, sync=sync_folders):
+    """Delete a batch's parked copies that pass deletable, logging each first.
+
+    A 'deleting' row is one a crash interrupted: gone means finish it, still
+    there means check and delete it again. A failed sync raises and leaves
+    the row 'deleting' for the next run to settle.
+    """
+    deleted = size = 0
+    kept = []
+    for row in _parked_rows(db, [batch_id]):
+        if stop():
+            return DeleteResult(deleted, tuple(kept), size, True)
+        destination = row['Destination']
+        if not (row['Status'] == 'deleting' and not os.path.lexists(destination)):
+            reason = deletable(destination, keeper_for(row), duplicates_root)
+            if reason:
+                kept.append((destination, reason))
+                continue
+            _mark(db, batch_id, row['Seq'], 'deleting', None, now())
+            freed = _size(destination)
+            unlink(destination)
+            sync(os.path.dirname(destination))
+            size += freed
+        _mark(db, batch_id, row['Seq'], 'deleted', None, now())
+        _written(db.action("UPDATE orphans SET Status='deleted' WHERE OrphanID=?",
+                           [row['OrphanID']]), 'orphan %s as deleted' % row['OrphanID'])
+        deleted += 1
+    return DeleteResult(deleted, tuple(kept), size, False)
+
+
+def remove_empty_folders(paths, root, rmdir=os.rmdir):
+    """Remove folders emptied under root, deepest first; never root itself."""
+    inside = os.path.join(os.path.abspath(root), '')
+    candidates = set()
+    for path in paths:
+        folder = os.path.dirname(os.path.abspath(path))
+        while folder.startswith(inside):
+            candidates.add(folder)
+            folder = os.path.dirname(folder)
+    removed = []
+    for folder in sorted(candidates, key=lambda p: (-p.count(os.sep), p)):
+        try:
+            if os.path.isdir(folder) and not os.listdir(folder):
+                rmdir(folder)
+                removed.append(folder)
+        except OSError:
+            continue
+    return removed
 
 
 def _move_one(source, destination, rename, was_moving=False):

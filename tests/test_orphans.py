@@ -1131,6 +1131,12 @@ def test_visible_orphans_counts_only_search_matches_as_hidden():
 
 
 @pytest.mark.unit
+def test_visible_orphans_hides_deleted():
+    shown = orphans.visible_orphans([_row('z.cbz', 'deleted')], hide_reconciled=True)
+    assert shown.rows == () and shown.hidden == 1
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize("raw,expected", [
     ('1', True), ('true', True), ('True', True),
     ('0', False), ('false', False), ('', False), (None, False), ('yes please', False),

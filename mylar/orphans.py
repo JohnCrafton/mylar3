@@ -32,11 +32,11 @@ import math
 import re
 
 # Status values for an orphan record.
-ORPHAN_STATUSES = frozenset(['new', 'identified', 'filed', 'ignored', 'parked'])
+ORPHAN_STATUSES = frozenset(['new', 'identified', 'filed', 'ignored', 'parked', 'deleted'])
 
-# Statuses with nothing left to decide: filed into the library, or parked as a
-# duplicate of something that was.
-RECONCILED_STATUSES = frozenset(['filed', 'parked'])
+# Statuses with nothing left to decide: filed into the library, parked as a
+# duplicate of something that was, or that duplicate deleted.
+RECONCILED_STATUSES = frozenset(['filed', 'parked', 'deleted'])
 
 Visible = collections.namedtuple('Visible', 'rows hidden')
 

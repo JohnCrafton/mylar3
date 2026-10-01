@@ -553,3 +553,161 @@ def test_deletable_refuses_a_path_escaping_duplicates_by_symlink(tmp_path):
     os.symlink(str(tmp_path / 'S'), str(tmp_path / '_duplicates' / 'S'))
     escaped = str(tmp_path / '_duplicates' / 'S' / 'b.cbz')
     assert om.deletable(escaped, keep, _dupes(tmp_path)) == om.REASONS['outside']
+
+
+@pytest.mark.integration
+def test_deletable_fails_closed_when_samefile_raises_oserror(tmp_path):
+    park = _file(str(tmp_path / '_duplicates' / 'a.cbz'))
+    keep = _file(str(tmp_path / 'S' / 'a.cbz'))
+
+    # Monkeypatch os.path.samefile to raise OSError after isfile checks pass
+    original_samefile = os.path.samefile
+
+    def failing_samefile(a, b):
+        raise OSError(errno.ENOENT, 'gone')
+
+    os.path.samefile = failing_samefile
+    try:
+        result = om.deletable(park, keep, _dupes(tmp_path))
+        assert result == om.REASONS['keeper_missing']
+    finally:
+        os.path.samefile = original_samefile
+
+# --- deleting parked duplicates -------------------------------------------
+
+def _parked_batch(tmp_path, names=('a.cbz',)):
+    """A done batch of parks, each with its keeper on disk."""
+    db = FakeDB()
+    moves, keepers = [], {}
+    for i, name in enumerate(names):
+        src = _file(str(tmp_path / 'F' / name), b'dupe-%d' % i)
+        dst = ob.park_destination(src, str(tmp_path))
+        moves.append(ob.Move('park', 'o%d' % i, src, dst, 'i%d' % i))
+        keepers['i%d' % i] = _file(str(tmp_path / 'S' / name), b'kept-%d' % i)
+        db.add_orphans([{'OrphanID': 'o%d' % i, 'FilePath': src, 'FileName': name,
+                         'Status': 'parked'}])
+    batch = _plan(db, moves)
+    om.execute(db, batch, _now)
+    return db, batch, keepers
+
+
+def _keeper_for(keepers):
+    return lambda row: keepers.get(row['IssueID'])
+
+
+def _orphan_statuses(db):
+    return [r['Status'] for r in db.select('SELECT Status FROM orphans ORDER BY OrphanID')]
+
+
+@pytest.mark.integration
+def test_delete_parked_logs_unlinks_syncs_then_marks(tmp_path):
+    db, batch, keepers = _parked_batch(tmp_path)
+    events = []
+
+    def unlink(path):
+        events.append(('unlink', _statuses(db)[0][1]))
+        os.unlink(path)
+
+    def sync(*folders):
+        events.append(('sync', _statuses(db)[0][1]))
+
+    result = om.delete_parked(db, batch, _now, _keeper_for(keepers), _dupes(tmp_path),
+                              unlink=unlink, sync=sync)
+    assert events == [('unlink', 'deleting'), ('sync', 'deleting')]
+    assert result.deleted == 1 and result.kept == () and result.bytes == len(b'dupe-0')
+    assert _statuses(db) == [('park', 'deleted')]
+    assert _orphan_statuses(db) == ['deleted']
+    assert os.path.isfile(keepers['i0'])
+
+
+@pytest.mark.integration
+def test_delete_parked_keeps_a_park_renamed_after_filing(tmp_path):
+    db, batch, keepers = _parked_batch(tmp_path)
+    dst = db.select('SELECT Destination FROM orphan_moves')[0]['Destination']
+    os.rename(dst, dst[:-4] + '.cbr')          # what Komga did, in reverse
+    result = om.delete_parked(db, batch, _now, _keeper_for(keepers), _dupes(tmp_path))
+    assert result.deleted == 0
+    assert result.kept == ((dst, om.REASONS['missing']),)
+    assert _statuses(db) == [('park', 'done')]
+    assert os.path.isfile(dst[:-4] + '.cbr')
+
+
+@pytest.mark.integration
+def test_delete_parked_leaves_moves_alone(tmp_path):
+    db = FakeDB()
+    src = _file(str(tmp_path / 'F' / 'a.cbz'))
+    batch = _plan(db, [ob.Move('move', 'o1', src, str(tmp_path / 'S' / 'a.cbz'), 'i1')])
+    om.execute(db, batch, _now)
+    result = om.delete_parked(db, batch, _now, lambda row: None, _dupes(tmp_path))
+    assert result == om.DeleteResult(0, (), 0, False)
+    assert os.path.isfile(str(tmp_path / 'S' / 'a.cbz'))
+
+
+@pytest.mark.integration
+def test_delete_parked_stop_leaves_the_rest_done(tmp_path):
+    db, batch, keepers = _parked_batch(tmp_path, ('a.cbz', 'b.cbz'))
+    asked = []
+
+    def stop():
+        asked.append(1)
+        return len(asked) > 1
+
+    result = om.delete_parked(db, batch, _now, _keeper_for(keepers), _dupes(tmp_path), stop=stop)
+    assert result.deleted == 1 and result.stopped
+    assert _statuses(db) == [('park', 'deleted'), ('park', 'done')]
+
+
+@pytest.mark.integration
+def test_delete_parked_finishes_a_deleting_row_whose_file_is_gone(tmp_path):
+    db, batch, keepers = _parked_batch(tmp_path)
+    dst = db.select('SELECT Destination FROM orphan_moves')[0]['Destination']
+    db.action("UPDATE orphan_moves SET Status='deleting'")
+    os.unlink(dst)                              # crashed after unlink, before marking
+    result = om.delete_parked(db, batch, _now, _keeper_for(keepers), _dupes(tmp_path))
+    assert result.deleted == 1 and result.bytes == 0
+    assert _statuses(db) == [('park', 'deleted')]
+
+
+@pytest.mark.integration
+def test_delete_parked_rechecks_a_deleting_row_whose_file_is_still_there(tmp_path):
+    db, batch, keepers = _parked_batch(tmp_path)
+    db.action("UPDATE orphan_moves SET Status='deleting'")
+    result = om.delete_parked(db, batch, _now, _keeper_for(keepers), _dupes(tmp_path))
+    assert result.deleted == 1
+    assert _statuses(db) == [('park', 'deleted')]
+
+
+@pytest.mark.integration
+def test_delete_parked_leaves_deleting_when_sync_fails(tmp_path):
+    db, batch, keepers = _parked_batch(tmp_path)
+
+    def sync(*folders):
+        raise OSError(errno.EIO, 'I/O error')
+
+    with pytest.raises(OSError):
+        om.delete_parked(db, batch, _now, _keeper_for(keepers), _dupes(tmp_path), sync=sync)
+    assert _statuses(db) == [('park', 'deleting')]
+
+
+@pytest.mark.integration
+def test_preview_agrees_with_what_delete_then_does(tmp_path):
+    db, batch, keepers = _parked_batch(tmp_path, ('a.cbz', 'b.cbz'))
+    os.unlink(keepers['i1'])
+    preview = om.preview_delete(db, [batch], _keeper_for(keepers), _dupes(tmp_path))
+    result = om.delete_parked(db, batch, _now, _keeper_for(keepers), _dupes(tmp_path))
+    assert preview['files'] == result.deleted == 1
+    assert preview['bytes'] == result.bytes
+    assert [tuple(k) for k in preview['kept']] == list(result.kept)
+
+
+@pytest.mark.integration
+def test_remove_empty_folders_climbs_to_root_and_stops(tmp_path):
+    root = str(tmp_path / '_duplicates')
+    deep = tmp_path / '_duplicates' / 'A' / 'v1'
+    deep.mkdir(parents=True)
+    keep = tmp_path / '_duplicates' / 'B'
+    keep.mkdir()
+    (keep / 'x.cbz').write_bytes(b'x')
+    removed = om.remove_empty_folders([str(deep / 'gone.cbz'), str(keep / 'x.cbz')], root)
+    assert removed == [str(deep), str(tmp_path / '_duplicates' / 'A')]
+    assert os.path.isdir(root) and os.path.isdir(str(keep))
