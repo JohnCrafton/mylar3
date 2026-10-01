@@ -538,7 +538,7 @@
                 },
                 "infoCallback": function(settings, start, end, max, total, pre){
                     var hidden = settings.json ? settings.json.iHidden : 0;
-                    return hidden ? pre + ' (' + hidden + ' filed or parked hidden)' : pre;
+                    return hidden ? pre + ' (' + hidden.toLocaleString() + ' filed or parked hidden)' : pre;
                 },
                 "columnDefs": [
                     { "targets": [0], "render": function(d,t,full){
