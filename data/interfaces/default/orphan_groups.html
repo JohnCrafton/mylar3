@@ -135,6 +135,7 @@
             <p><strong>This permanently deletes the files. Revert cannot bring them back.</strong></p>
             <div id="od_kept"></div>
             <p>Type <code>DELETE</code> to confirm: <input type="text" id="od_typed" autocomplete="off" size="10" /></p>
+            <p><input type="button" id="od_go" value="Delete" disabled="disabled" /> <input type="button" id="od_cancel" value="Cancel" /></p>
         </div>
 </%def>
 
@@ -345,15 +346,13 @@
                         $('#od_typed').val('');
                         $('#orphan_delete_dialog').dialog({
                                 width: 640, modal: true,
-                                buttons: [
-                                        {text: 'Delete', id: 'od_go', click: function(){
-                                                $(this).dialog('close');
-                                                startJob('orphanDeleteParked', params);
-                                        }},
-                                        {text: 'Cancel', click: function(){ $(this).dialog('close'); }}
-                                ]
                         });
-                        $('#od_go').button('disable');
+                        $('#od_go').prop('disabled', true).off('click').on('click', function(){
+                                if ($(this).prop('disabled')) return;
+                                $('#orphan_delete_dialog').dialog('close');
+                                startJob('orphanDeleteParked', params);
+                        });
+                        $('#od_cancel').off('click').on('click', function(){ $('#orphan_delete_dialog').dialog('close'); });
                 }).fail(function(){ setSticky('Request failed - see the Mylar log.'); });
         }
 
@@ -377,7 +376,7 @@
                 });
                 $(document).on('input keyup', '#od_typed', function(){
                         var ok = $(this).val() === 'DELETE' && deleteFiles > 0;
-                        $('#od_go').button(ok ? 'enable' : 'disable');
+                        $('#od_go').prop('disabled', !ok);
                 });
 
                 $(document).on('click', 'a.og-action[data-group]', function(e){
