@@ -67,6 +67,7 @@ function initActions() {
     $("#subhead_menu #menu_link_shutdown").button({ icons: { primary: "ui-icon-power"} });
     $("#subhead_menu #menu_link_carepackage").button({ icons: { primary: "ui-icon-heart"} });
     $("#subhead_menu #menu_link_scan").button({ icons: { primary: "ui-icon-search"} });
+    $("#subhead_menu #menu_link_view").button({ icons: { primary: "ui-icon-folder-open"} });
     $("#subhead_menu #menu_link_addalltoRL").button({ icons: { primary: "ui-icon-plus"} });
 }
 
