@@ -93,21 +93,21 @@
 
             <h2>Batches</h2>
             <table class="orphan_panel" style="width:100%">
-                <thead><tr><th>When</th><th>Batch</th><th>Series</th><th>Done</th><th>Failed</th><th>Planned</th><th>Reverted</th><th></th></tr></thead>
+                <thead><tr><th>When</th><th>Batch</th><th>Series</th><th>Done</th><th>Parked</th><th>Failed</th><th>Planned</th><th>Reverted</th><th></th></tr></thead>
                 <tbody>
 %for b in batches:
                     <tr>
                         <td>${b['When'] | h}</td><td>${b['BatchID'] | h}</td>
                         <td><a href="comicDetails?ComicID=${b['ComicID'] | h}">${b['ComicID'] | h}</a></td>
-                        <td>${b['done'] | h}</td><td>${b['failed'] | h}</td><td>${b['planned'] | h}</td><td>${b['reverted'] | h}</td>
-                        <td>
+                        <td>${b['done'] | h}</td><td>${b['parked'] | h}</td><td>${b['failed'] | h}</td><td>${b['planned'] | h}</td><td>${b['reverted'] | h}</td>
+                        <td class="og-batch-actions">
 %if b['resumable']:
-                            <a href="#" class="og-action" data-action="orphanBatchResume" data-batch="${b['BatchID'] | h}">Resume</a>
+                            <input type="button" class="og-action" data-action="orphanBatchResume" data-batch="${b['BatchID'] | h}" value="Resume" />
 %endif
 %if b['done']:
-                            <a href="#" class="og-action" data-action="orphanBatchRevert" data-batch="${b['BatchID'] | h}" data-confirm="Put every file in this batch back where it was?">Revert</a>
+                            <input type="button" class="og-action" data-action="orphanBatchRevert" data-batch="${b['BatchID'] | h}" data-confirm="Put every file in this batch back where it was?" value="Revert" />
 %if b['RunID']:
-                            &middot; <a href="#" class="og-action" data-action="orphanRunRevert" data-run="${b['RunID'] | h}" data-confirm="Revert every batch of run ${b['RunID'] | h}?">Revert run</a>
+                            <input type="button" class="og-action" data-action="orphanRunRevert" data-run="${b['RunID'] | h}" data-confirm="Revert every batch of run ${b['RunID'] | h}?" value="Revert run" />
 %endif
 %endif
                         </td>
@@ -131,6 +131,7 @@
         table.orphan_panel tbody tr:nth-child(even) { background: rgba(127,127,127,.07); }
         .orphan_cover { max-height:190px; max-width:130px; border:1px solid #444; }
         .og-cover { max-height:40px; max-width:40px; border:1px solid #444; margin-right:4px; vertical-align:middle; }
+        td.og-batch-actions { white-space: nowrap; }
         a.disabled { opacity:0.5; cursor:not-allowed; pointer-events:none; }
         input[type="button"]:disabled { opacity:0.5; cursor:not-allowed; }
         </style>
