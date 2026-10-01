@@ -83,7 +83,11 @@ REASONS = {
     'keeper_missing': 'kept file missing',
     'same_file': 'is the kept file',
     'outside': 'outside _duplicates',
+    'keeper_smaller': 'kept file is smaller',
 }
+
+# A parked copy this much bigger than the kept file might be the better one.
+_SIZE_TOLERANCE = 1.05
 
 
 def deletable(destination, keeper, duplicates_root):
@@ -106,10 +110,14 @@ def deletable(destination, keeper, duplicates_root):
         if (os.path.realpath(keeper) == os.path.realpath(destination)
                 or os.path.samefile(keeper, destination)):
             return REASONS['same_file']
+        keeper_size = os.path.getsize(keeper)
+        park_size = os.path.getsize(destination)
     except OSError:
-        # If samefile or realpath raises (e.g. keeper vanished between isfile check
-        # and samefile), fail closed: treat keeper as missing
+        # If samefile, realpath or a size read raises (e.g. keeper vanished between
+        # the isfile check and here), fail closed: treat keeper as missing
         return REASONS['keeper_missing']
+    if keeper_size == 0 or park_size > keeper_size * _SIZE_TOLERANCE:
+        return REASONS['keeper_smaller']
     return None
 
 
@@ -155,7 +163,8 @@ def delete_parked(db, batch_id, now, keeper_for, duplicates_root, stop=lambda: F
 
     A 'deleting' row is one a crash interrupted: gone means finish it, still
     there means check and delete it again. A failed sync raises and leaves
-    the row 'deleting' for the next run to settle.
+    the row 'deleting' for the next run to settle. A refused unlink puts the
+    row back to 'done', reports the file kept, and carries on.
     """
     deleted = size = 0
     kept = []
@@ -166,11 +175,21 @@ def delete_parked(db, batch_id, now, keeper_for, duplicates_root, stop=lambda: F
         if not (row['Status'] == 'deleting' and not os.path.lexists(destination)):
             reason = deletable(destination, keeper_for(row), duplicates_root)
             if reason:
+                if row['Status'] == 'deleting':
+                    _mark(db, batch_id, row['Seq'], 'done', None, now())
                 kept.append((destination, reason))
                 continue
             _mark(db, batch_id, row['Seq'], 'deleting', None, now())
             freed = _size(destination)
-            unlink(destination)
+            try:
+                unlink(destination)
+            except FileNotFoundError:
+                freed = 0         # already gone: finish the row below
+            except OSError as e:
+                _mark(db, batch_id, row['Seq'], 'done', 'could not delete: %s' % e.strerror,
+                      now())
+                kept.append((destination, 'could not delete: %s' % e.strerror))
+                continue
             sync(os.path.dirname(destination))
             size += freed
         _mark(db, batch_id, row['Seq'], 'deleted', None, now())
@@ -317,14 +336,19 @@ def revert(db, batch_id, now, rename=os.rename, sync=sync_folders):
     source the rename never happened and the row is cancelled with the
     planned ones; otherwise it is put back like a done row.
     """
-    gone = tuple((r['Source'], 'deleted on %s; cannot be put back' % r['WhenDone'])
-                 for r in db.select("SELECT Source, WhenDone FROM orphan_moves"
-                                    " WHERE BatchID=? AND Kind='park'"
-                                    " AND Status IN ('deleted', 'deleting')"
-                                    " ORDER BY Seq DESC", [batch_id]))
-    rows = db.select("SELECT Seq, Kind, Source, Destination, Status FROM orphan_moves"
-                     " WHERE BatchID=? AND Status IN ('done', 'moving') ORDER BY Seq DESC",
-                     [batch_id])
+    # A 'deleting' row is a delete a crash interrupted: with its file gone it
+    # is a deletion that cannot be undone, with the file there it is a park.
+    gone, rows = [], []
+    for r in db.select("SELECT Seq, Kind, Source, Destination, Status, WhenDone"
+                       " FROM orphan_moves WHERE BatchID=?"
+                       " AND Status IN ('done', 'moving', 'deleting', 'deleted')"
+                       " ORDER BY Seq DESC", [batch_id]):
+        if r['Status'] == 'deleted' or (r['Status'] == 'deleting'
+                                        and not os.path.lexists(r['Destination'])):
+            gone.append((r['Source'], 'deleted on %s; cannot be put back' % r['WhenDone']))
+        else:
+            rows.append(r)
+    gone = tuple(gone)
     reverted = 0
     skipped = []
     for row in rows:

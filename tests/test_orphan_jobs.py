@@ -786,3 +786,25 @@ def test_load_batches_counts_parked_and_deleted(tmp_path):
     db.action("UPDATE orphan_moves SET Status='deleted' WHERE OrphanID='o1'")
     batch = oj.load_batches(db)[0]
     assert (batch['parked'], batch['parked_bytes'], batch['deleted']) == (1, 32, 1)
+
+
+@pytest.mark.integration
+def test_delete_parked_job_goes_on_to_the_next_batch_when_unlink_is_refused(tmp_path, monkeypatch):
+    db, lib, folder, fake, batch_id = _filed_with_a_park(tmp_path)
+    real = oj.moves.delete_parked
+    calls = []
+
+    def refusing_first(*args, **kwargs):
+        calls.append(1)
+        if len(calls) == 1:
+            def refuse(path):
+                raise PermissionError(13, 'Permission denied')
+            kwargs['unlink'] = refuse
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(oj.moves, 'delete_parked', refusing_first)
+    # the same batch twice stands in for two batches: the first pass is refused
+    results = oj.delete_parked_job(db, [batch_id, batch_id], fake.deps())
+
+    assert [r.deleted for r in results] == [0, 1]
+    assert [reason for _, reason in results[0].kept] == ['could not delete: Permission denied']

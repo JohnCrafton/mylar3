@@ -730,3 +730,100 @@ def test_remove_empty_folders_climbs_to_root_and_stops(tmp_path):
     removed = om.remove_empty_folders([str(deep / 'gone.cbz'), str(keep / 'x.cbz')], root)
     assert removed == [str(deep), str(tmp_path / '_duplicates' / 'A')]
     assert os.path.isdir(root) and os.path.isdir(str(keep))
+
+
+@pytest.mark.integration
+def test_deletable_keeps_a_park_when_the_keeper_is_empty(tmp_path):
+    park = _file(str(tmp_path / '_duplicates' / 'F' / 'F 001.cbz'), b'x' * 100)
+    keep = _file(str(tmp_path / 'S' / 'F 001.cbz'), b'')
+    assert om.deletable(park, keep, _dupes(tmp_path)) == 'kept file is smaller'
+    assert om.REASONS['keeper_smaller'] == 'kept file is smaller'
+
+
+@pytest.mark.integration
+def test_deletable_keeps_a_park_more_than_five_percent_bigger_than_its_keeper(tmp_path):
+    park = _file(str(tmp_path / '_duplicates' / 'F' / 'F 001.cbz'), b'x' * 106)
+    keep = _file(str(tmp_path / 'S' / 'F 001.cbz'), b'y' * 100)
+    assert om.deletable(park, keep, _dupes(tmp_path)) == om.REASONS['keeper_smaller']
+
+
+@pytest.mark.integration
+def test_deletable_allows_a_park_within_five_percent_or_smaller(tmp_path):
+    keep = _file(str(tmp_path / 'S' / 'F 001.cbz'), b'y' * 100)
+    edge = _file(str(tmp_path / '_duplicates' / 'F' / 'edge.cbz'), b'x' * 105)
+    small = _file(str(tmp_path / '_duplicates' / 'F' / 'small.cbz'), b'x' * 40)
+    assert om.deletable(edge, keep, _dupes(tmp_path)) is None
+    assert om.deletable(small, keep, _dupes(tmp_path)) is None
+
+
+@pytest.mark.integration
+def test_delete_parked_keeps_a_park_and_carries_on_when_unlink_is_refused(tmp_path):
+    db, batch, keepers = _parked_batch(tmp_path, ('a.cbz', 'b.cbz'))
+    dsts = [r['Destination'] for r in db.select('SELECT Destination FROM orphan_moves ORDER BY Seq')]
+    calls = []
+
+    def unlink(path):
+        calls.append(path)
+        if len(calls) == 1:
+            raise PermissionError(errno.EACCES, os.strerror(errno.EACCES))
+        os.unlink(path)
+
+    result = om.delete_parked(db, batch, _now, _keeper_for(keepers), _dupes(tmp_path),
+                              unlink=unlink)
+    assert result.kept == ((dsts[0], 'could not delete: Permission denied'),)
+    assert result.deleted == 1
+    assert _statuses(db) == [('park', 'done'), ('park', 'deleted')]
+    assert os.path.isfile(dsts[0]) and not os.path.exists(dsts[1])
+    errors = [r['Error'] for r in db.select('SELECT Error FROM orphan_moves ORDER BY Seq')]
+    assert 'Permission denied' in errors[0]
+
+
+@pytest.mark.integration
+def test_delete_parked_counts_a_file_that_vanished_before_unlink(tmp_path):
+    db, batch, keepers = _parked_batch(tmp_path)
+
+    def unlink(path):
+        os.unlink(path)
+        raise FileNotFoundError(errno.ENOENT, 'No such file or directory')
+
+    result = om.delete_parked(db, batch, _now, _keeper_for(keepers), _dupes(tmp_path),
+                              unlink=unlink)
+    assert result.deleted == 1 and result.bytes == 0 and result.kept == ()
+    assert _statuses(db) == [('park', 'deleted')]
+    assert _orphan_statuses(db) == ['deleted']
+
+
+@pytest.mark.integration
+def test_delete_parked_puts_a_deleting_row_back_when_it_is_now_kept(tmp_path):
+    db, batch, keepers = _parked_batch(tmp_path)
+    db.action("UPDATE orphan_moves SET Status='deleting'")
+    os.unlink(keepers['i0'])
+    dst = db.select('SELECT Destination FROM orphan_moves')[0]['Destination']
+    result = om.delete_parked(db, batch, _now, _keeper_for(keepers), _dupes(tmp_path))
+    assert result.deleted == 0
+    assert result.kept == ((dst, om.REASONS['keeper_missing']),)
+    assert _statuses(db) == [('park', 'done')]
+    assert os.path.isfile(dst)
+
+
+@pytest.mark.integration
+def test_revert_restores_a_deleting_row_whose_file_is_still_there(tmp_path):
+    db, batch, keepers = _parked_batch(tmp_path)
+    src = db.select('SELECT Source FROM orphan_moves')[0]['Source']
+    db.action("UPDATE orphan_moves SET Status='deleting'")
+    result = om.revert(db, batch, _now)
+    assert result.reverted == 1 and result.skipped == ()
+    assert os.path.isfile(src)
+    assert _statuses(db) == [('park', 'reverted')]
+
+
+@pytest.mark.integration
+def test_revert_reports_a_deleting_row_whose_file_is_gone(tmp_path):
+    db, batch, keepers = _parked_batch(tmp_path)
+    row = db.select('SELECT Source, Destination FROM orphan_moves')[0]
+    db.action("UPDATE orphan_moves SET Status='deleting'")
+    os.unlink(row['Destination'])
+    result = om.revert(db, batch, _now)
+    assert result.reverted == 0
+    assert result.skipped == ((row['Source'], 'deleted on %s; cannot be put back' % _now()),)
+    assert _statuses(db) == [('park', 'deleting')]
