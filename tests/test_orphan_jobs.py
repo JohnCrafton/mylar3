@@ -39,14 +39,15 @@ def test_identify_records_tiers_and_links_orphans_to_their_group():
         orphan('/lib/Arc/b.cbz', OrphanID='m2', ParsedSeries='Doomsday')])
     searched = []
 
-    def search(series, issue, year):
-        searched.append((series, issue, year))
+    def search(series):
+        searched.append(series)
         return _fables_result()
 
     summary = oj.identify_groups(db, search, _now, _no_sleep, 20)
 
     assert summary == {'auto': 1, 'review': 0, 'mixed': 1, 'stopped': False, 'reason': None}
-    assert searched == [('Fables', '3', '2002')]          # mixed groups cost no search
+    # issue and year rank the candidates; filtering on them dropped real series
+    assert searched == ['Fables']                         # mixed groups cost no search
     groups = _groups(db)
     fables = groups['/lib/Fables/Volume 01 (2002)']
     assert (fables['Tier'], fables['Status'], fables['ComicID']) == ('auto', 'identified', '25543')
@@ -95,6 +96,24 @@ def test_identify_skips_groups_already_identified():
     calls = []
     oj.identify_groups(db, lambda *a: calls.append(a) or _fables_result(), _now, _no_sleep, 20)
     assert calls == []
+
+
+@pytest.mark.integration
+def test_identify_asks_again_for_groups_whose_search_found_nothing():
+    db = FakeDB()
+    db.add_orphans(_fables(folder='/lib/A (2002)') + _fables(folder='/lib/B (2002)')
+                   + [orphan('/lib/Arc/a.cbz', OrphanID='m1', ParsedSeries='Superman'),
+                      orphan('/lib/Arc/b.cbz', OrphanID='m2', ParsedSeries='Doomsday')])
+    answers = iter([[], _fables_result()])         # same size, so A is asked first
+    oj.identify_groups(db, lambda series: next(answers), _now, _no_sleep, 20)
+    assert json.loads(_groups(db)['/lib/A (2002)']['Candidates']) == []
+
+    calls = []
+    oj.identify_groups(db, lambda series: calls.append(series) or _fables_result(),
+                       _now, _no_sleep, 20)
+
+    assert calls == ['Fables']                     # only the empty one; not B, not mixed
+    assert json.loads(_groups(db)['/lib/A (2002)']['Candidates'])[0]['name'] == 'Fables'
 
 
 @pytest.mark.integration
