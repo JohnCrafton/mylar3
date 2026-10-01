@@ -485,3 +485,71 @@ def test_sync_folders_flushes_real_directories(tmp_path):
     a = tmp_path / 'a'
     a.mkdir()
     om.sync_folders(str(a), str(tmp_path))
+
+
+# --- deleting parked duplicates -------------------------------------------
+
+def _dupes(tmp_path):
+    return str(tmp_path / '_duplicates')
+
+
+@pytest.mark.integration
+def test_deletable_allows_a_parked_copy_with_its_keeper_on_disk(tmp_path):
+    park = _file(str(tmp_path / '_duplicates' / 'F' / 'F 001.cbz'))
+    keep = _file(str(tmp_path / 'Fables (2002)' / 'Fables 001.cbz'))
+    assert om.deletable(park, keep, _dupes(tmp_path)) is None
+
+
+@pytest.mark.integration
+def test_deletable_keeps_a_park_not_at_its_logged_path(tmp_path):
+    keep = _file(str(tmp_path / 'S' / 'a.cbz'))
+    missing = str(tmp_path / '_duplicates' / 'F' / 'a.cbr')
+    assert om.deletable(missing, keep, _dupes(tmp_path)) == om.REASONS['missing']
+
+
+@pytest.mark.integration
+def test_deletable_keeps_a_park_whose_issue_has_no_recorded_file(tmp_path):
+    park = _file(str(tmp_path / '_duplicates' / 'a.cbz'))
+    assert om.deletable(park, None, _dupes(tmp_path)) == om.REASONS['no_keeper_record']
+
+
+@pytest.mark.integration
+def test_deletable_keeps_a_park_whose_kept_file_is_gone(tmp_path):
+    park = _file(str(tmp_path / '_duplicates' / 'a.cbz'))
+    gone = str(tmp_path / 'S' / 'a.cbr')
+    assert om.deletable(park, gone, _dupes(tmp_path)) == om.REASONS['keeper_missing']
+
+
+@pytest.mark.integration
+def test_deletable_refuses_when_keeper_is_the_parked_file_via_symlink(tmp_path):
+    park = _file(str(tmp_path / '_duplicates' / 'a.cbz'))
+    os.makedirs(str(tmp_path / 'S'))
+    link = str(tmp_path / 'S' / 'a.cbz')
+    os.symlink(park, link)
+    assert om.deletable(park, link, _dupes(tmp_path)) == om.REASONS['same_file']
+
+
+@pytest.mark.integration
+def test_deletable_refuses_when_keeper_is_the_parked_file_via_hardlink(tmp_path):
+    park = _file(str(tmp_path / '_duplicates' / 'a.cbz'))
+    os.makedirs(str(tmp_path / 'S'))
+    link = str(tmp_path / 'S' / 'a.cbz')
+    os.link(park, link)
+    assert om.deletable(park, link, _dupes(tmp_path)) == om.REASONS['same_file']
+
+
+@pytest.mark.integration
+def test_deletable_refuses_a_file_outside_duplicates(tmp_path):
+    stray = _file(str(tmp_path / 'S' / 'b.cbz'))
+    keep = _file(str(tmp_path / 'S' / 'a.cbz'))
+    assert om.deletable(stray, keep, _dupes(tmp_path)) == om.REASONS['outside']
+
+
+@pytest.mark.integration
+def test_deletable_refuses_a_path_escaping_duplicates_by_symlink(tmp_path):
+    real = _file(str(tmp_path / 'S' / 'b.cbz'))
+    keep = _file(str(tmp_path / 'S' / 'a.cbz'))
+    os.makedirs(str(tmp_path / '_duplicates'))
+    os.symlink(str(tmp_path / 'S'), str(tmp_path / '_duplicates' / 'S'))
+    escaped = str(tmp_path / '_duplicates' / 'S' / 'b.cbz')
+    assert om.deletable(escaped, keep, _dupes(tmp_path)) == om.REASONS['outside']

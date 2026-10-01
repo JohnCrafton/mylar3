@@ -77,6 +77,37 @@ def sync_folders(*folders):
             os.close(fd)
 
 
+REASONS = {
+    'missing': 'not at logged path',
+    'no_keeper_record': 'issue has no recorded file',
+    'keeper_missing': 'kept file missing',
+    'same_file': 'is the kept file',
+    'outside': 'outside _duplicates',
+}
+
+
+def deletable(destination, keeper, duplicates_root):
+    """None when a parked copy may be deleted, else the reason it stays.
+
+    keeper is the file Mylar records for the issue the copy duplicates, or
+    None when it records none. Checked against the disk as it is now: the log
+    can be out of date (another tool may have renamed either file since).
+    """
+    if not os.path.isfile(destination) or os.path.islink(destination):
+        return REASONS['missing']
+    inside = os.path.join(os.path.realpath(duplicates_root), '')
+    if not os.path.realpath(destination).startswith(inside):
+        return REASONS['outside']
+    if keeper is None:
+        return REASONS['no_keeper_record']
+    if not os.path.isfile(keeper):
+        return REASONS['keeper_missing']
+    if (os.path.realpath(keeper) == os.path.realpath(destination)
+            or os.path.samefile(keeper, destination)):
+        return REASONS['same_file']
+    return None
+
+
 def _move_one(source, destination, rename, was_moving=False):
     """None when the file is at destination afterwards, else why not.
 
