@@ -98,7 +98,19 @@ def pullsearch(comicapi, comicquery, offset, search_type):
     else:
         return dom
 
-def findComic(name, mode, issue, limityear=None, search_type=None, annual_check=False, page=None, pageSize=None):
+def _status_code(dom):
+    nodes = dom.getElementsByTagName('status_code')
+    return nodes[0].firstChild.wholeText.strip() if nodes and nodes[0].firstChild else None
+
+
+def _cv_error(dom):
+    nodes = dom.getElementsByTagName('error')
+    return nodes[0].firstChild.wholeText.strip() if nodes and nodes[0].firstChild else 'no reason given'
+
+
+def findComic(name, mode, issue, limityear=None, search_type=None, annual_check=False, page=None, pageSize=None, strict=False):
+    # strict: a ComicVine error reply (rate limit, bad key) returns False, like no reply,
+    # instead of an empty list that reads as "no series by that name"
 
     #with mb_lock:
     comicResults = None
@@ -150,6 +162,9 @@ def findComic(name, mode, issue, limityear=None, search_type=None, annual_check=
     #let's find out how many results we get from the query...
     searched = pullsearch(comicapi, comicquery, 0, search_type)
     if searched is None:
+        return False
+    if strict and _status_code(searched) != '1':
+        logger.warn('ComicVine refused the search for %s: %s' % (originalname, _cv_error(searched)))
         return False
     totalResults = searched.getElementsByTagName('number_of_total_results')[0].firstChild.wholeText
     logger.fdebug("there are " + str(totalResults) + " search results...")

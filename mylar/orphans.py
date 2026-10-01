@@ -110,12 +110,15 @@ def normalize_title(text):
 
 # Bits that filenames carry but ComicVine titles do not. Applied to the search
 # query only; the original filename stays visible in the UI.
-_QUERY_YEAR = re.compile(r"\(\s*(?:18|19|20)\d{2}\s*\)")
+_QUERY_YEAR = re.compile(r"\(\s*(?:18|19|20)\d{2}\s*(?:-\s*(?:(?:18|19|20)\d{2})?\s*)?\)")
+_QUERY_RELEASE_TAG = re.compile(r"\(\s*(?:scan|scans|digital|c2c)\s*\)", re.I)
+_QUERY_STRAY_BRACKET = re.compile(r"[()\[\]]")
 _QUERY_VOLUME = re.compile(r"\b(?:volume|vol\.?|v)\s*\.?\s*\d{1,3}\b", re.I)
 _QUERY_ISSUE_WORD = re.compile(r"\bissue\b\s*\d*", re.I)
 # A leading number is a reading-order prefix only when a separator follows it -
 # otherwise it is part of the title, as in "100 Bullets" or "2000 AD".
-_QUERY_ORDER_PREFIX = re.compile(r"^\d{1,4}\s*[-_]\s*")
+# "01 b - Superman": a letter can follow the number to order within a step.
+_QUERY_ORDER_PREFIX = re.compile(r"^\d{1,4}(?:\s*[a-z])?\s*[-_]\s*", re.I)
 
 
 # "3 (of 12)" and "3 of 12" both occur. The count is bounded to rule out a
@@ -151,9 +154,32 @@ def clean_series_query(series):
     cleaned = _QUERY_YEAR.sub(' ', cleaned)
     cleaned = _QUERY_VOLUME.sub(' ', cleaned)
     cleaned = _QUERY_ISSUE_WORD.sub(' ', cleaned)
+    cleaned = _QUERY_RELEASE_TAG.sub(' ', cleaned)
+    cleaned = _QUERY_STRAY_BRACKET.sub(' ', cleaned) if _unbalanced(cleaned) else cleaned
     cleaned = re.sub(r'\s+', ' ', cleaned).strip(' -_')
 
     return cleaned or str(series).strip()
+
+
+def _unbalanced(text):
+    return text.count('(') != text.count(')') or text.count('[') != text.count(']')
+
+
+# Where a subtitle or issue starts: " - ", ":" or "#". A hyphen inside a word
+# ("X-Men", "Spider-Man") is part of the title.
+_QUERY_CUT = re.compile(r"\s+-\s+|:|#")
+
+
+def shorter_query(series):
+    """The title before its first subtitle, for a retry when the full one found
+    nothing - or None when there is no shorter title to try."""
+    if not series:
+        return None
+    parts = _QUERY_CUT.split(str(series).strip(), 1)
+    head = parts[0].strip(' -_')
+    if len(parts) < 2 or not head:
+        return None
+    return head
 
 
 def title_similarity(left, right):

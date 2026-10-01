@@ -121,7 +121,11 @@ def identify_groups(db, search, now, sleep, pace, stop=lambda: False,
     or refusing this server, and the job stops rather than keep asking.
     """
     groups = batches.group_orphans(_unfiled_orphans(db))
-    done = set(r['GroupID'] for r in db.select('SELECT GroupID FROM orphan_groups'))
+    # A search that found nothing is asked again: ComicVine answers errors and
+    # rate limits with an empty result, which is not the same as no match
+    done = set(r['GroupID'] for r in db.select(
+        "SELECT GroupID FROM orphan_groups"
+        " WHERE NOT (Status='identified' AND Tier='review' AND Candidates='[]')"))
     todo = sorted((g for g in groups.values() if g.groupid not in done),
                   key=lambda g: (-len(g.orphans), g.folder))
 
@@ -140,7 +144,13 @@ def identify_groups(db, search, now, sleep, pace, stop=lambda: False,
         searched = False
         if ev.series and ev.share >= batches.MIXED_SHARE:
             parsed = batches.search_parsed(ev)
-            results = search(ev.series, parsed['issue'], ev.year)
+            # issue and year only rank: as search filters they dropped the real
+            # series whenever a cover date or issue ran past ComicVine's counts
+            results = search(ev.series)
+            shorter = orphans.shorter_query(ev.series)
+            if results == [] and shorter:
+                sleep(pace)
+                results = search(shorter)
             searched = True
             if results is False:
                 failures += 1

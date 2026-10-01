@@ -497,11 +497,38 @@ def test_survey_of_a_bad_root_is_empty():
     ('X-Men v2', 'X-Men'),
     ('Fables Vol. 3', 'Fables'),
     ('   Spaced   Out   ', 'Spaced Out'),
+    ('Death of Doctor Strange (2021-)', 'Death of Doctor Strange'),
+    ('Injustice (2013-2016)', 'Injustice'),
+    ('Wake the Devil (Scan)', 'Wake the Devil'),
+    ('Nyx (digital)', 'Nyx'),
+    ('Catwoman )', 'Catwoman'),
+    ('Batman (', 'Batman'),
+    ('01 b - Superman', 'Superman'),
+    ('05 m - Green Lantern', 'Green Lantern'),
     ('', ''),
     (None, ''),
 ])
 def test_clean_series_query(raw, expected):
     assert orphans.clean_series_query(raw) == expected
+
+
+# Asked only after the full title found nothing on ComicVine.
+@pytest.mark.unit
+@pytest.mark.parametrize("raw,expected", [
+    ('Sin City - Episode', 'Sin City'),
+    ('Hell And Back - A Sin City Love Story', 'Hell And Back'),
+    ('Batman: Batgirl: Girlfrenzy', 'Batman'),
+    ('Deadpool #044b - Black Panther', 'Deadpool'),
+    ('X-Calibre - Age Of Apocalypse', 'X-Calibre'),
+    ('X-Calibre', None),               # a hyphen inside a word is not a subtitle
+    ('WalkingDead', None),
+    ('Saga', None),
+    ('- Episode', None),               # nothing before the cut
+    ('', None),
+    (None, None),
+])
+def test_shorter_query(raw, expected):
+    assert orphans.shorter_query(raw) == expected
 
 
 @pytest.mark.unit

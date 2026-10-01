@@ -1753,11 +1753,9 @@ class WebInterface(object):
             return json.dumps({'status': 'failure',
                                'message': 'Another orphan job is already running.'})
 
-        def search(series, issue, year):
+        def search(series):
             try:
-                return mb.findComic(series, mode='series',
-                                    issue=orphanlib.as_search_issue(issue),
-                                    limityear=year)
+                return mb.findComic(series, mode='series', issue=None, strict=True)
             except Exception as e:
                 logger.warn('[ORPHANS] ComicVine search for %s failed: %s' % (series, e))
                 return False
