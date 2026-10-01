@@ -65,6 +65,19 @@ jobs:
               tags: ${{ steps.meta.outputs.tags }}
               labels: ${{ steps.meta.outputs.labels }}
 
+    cleanup_untagged:
+        # Builds on different branches share one package. Two cleanups at once
+        # list the same untagged image and the slower one fails with a 404, so
+        # every branch's cleanup queues in one repo-wide group instead.
+        needs: push_to_registry
+        name: Cleanup old untagged GHCR images
+        runs-on: ubuntu-latest
+        concurrency:
+            group: ghcr-cleanup-${{ github.repository }}
+            cancel-in-progress: false
+        permissions:
+          packages: write
+        steps:
           - name: Cleanup old untagged GHCR images
             uses: dataaxiom/ghcr-cleanup-action@cd0cdb900b5dbf3a6f2cc869f0dbb0b8211f50c4 # v1.0.16
             with:
