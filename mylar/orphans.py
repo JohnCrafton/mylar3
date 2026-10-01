@@ -34,6 +34,33 @@ import re
 # Status values for an orphan record.
 ORPHAN_STATUSES = frozenset(['new', 'identified', 'filed', 'ignored', 'parked'])
 
+# Statuses with nothing left to decide: filed into the library, or parked as a
+# duplicate of something that was.
+RECONCILED_STATUSES = frozenset(['filed', 'parked'])
+
+Visible = collections.namedtuple('Visible', 'rows hidden')
+
+
+def parse_flag(value):
+    """True only for an explicit '1' or 'true' from a request parameter."""
+    return str(value).strip().lower() in ('1', 'true')
+
+
+def visible_orphans(rows, search='', hide_reconciled=False):
+    """The rows a search shows, and how many reconciled ones were held back.
+
+    search matches file name or path, ignoring case. hidden counts only rows
+    the search would otherwise have shown.
+    """
+    needle = (search or '').lower()
+    matched = [r for r in rows if not needle
+               or needle in (r['FileName'] or '').lower()
+               or needle in (r['FilePath'] or '').lower()]
+    if not hide_reconciled:
+        return Visible(tuple(matched), 0)
+    shown = tuple(r for r in matched if r['Status'] not in RECONCILED_STATUSES)
+    return Visible(shown, len(matched) - len(shown))
+
 # Weights per signal. Only the signals actually available are counted, and the
 # raw total is rescaled against what was achievable - see score_candidate.
 WEIGHTS = {
