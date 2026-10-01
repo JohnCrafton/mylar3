@@ -278,6 +278,7 @@
         }
 
         $(document).ready(function(){
+                initActions();
                 updateApproveText();
                 $('.auto_include').on('change', updateApproveText);
                 $('#btn_approve').on('click', approveAuto);
